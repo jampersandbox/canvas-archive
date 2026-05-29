@@ -3,8 +3,7 @@
 canvas_auth.py
 ==============
 Handles Canvas login via browser session.
-Supports both terminal mode (press Enter) and GUI mode
-(waits for a sentinel file written by canvas_archive.py).
+Works in both terminal mode and GUI mode.
 """
 from __future__ import annotations
 
@@ -22,41 +21,28 @@ try:
 except ImportError:
     CANVAS_BASE_URL = "https://canvas.harvard.edu"
 
-BROWSER_PROFILE  = Path("./browser_profile")
-COOKIE_FILE      = Path("./canvas_cookies.json")
-
-# When running inside the GUI, canvas_archive.py creates this file
-# instead of sending Enter via stdin.
+BROWSER_PROFILE   = Path("./browser_profile")
+COOKIE_FILE       = Path("./canvas_cookies.json")
 GUI_SENTINEL_FILE = Path("./gui_login_ready.txt")
 
 
-def _wait_for_login():
+def get_cookies() -> list[dict]:
     """
-    Wait for the user to finish logging in.
-    - In GUI mode: waits for gui_login_ready.txt to appear
-    - In terminal mode: waits for the user to press Enter
+    Get Canvas session cookies.
+    - If saved cookies exist, return them immediately (no browser needed).
+    - Otherwise open a browser and ask the user to log in.
     """
-    # Clean up any leftover sentinel from a previous run
-    if GUI_SENTINEL_FILE.exists():
-        GUI_SENTINEL_FILE.unlink()
-
-    # Are we running inside the GUI?
-    if os.environ.get("CANVAS_ARCHIVE_GUI"):
-        print("  [Waiting for GUI login confirmation...]")
-        # Poll for the sentinel file every 0.5 seconds
-        while not GUI_SENTINEL_FILE.exists():
-            time.sleep(0.5)
-        # Clean up
+    # ── Fast path: use saved cookies from a previous run ──────────────────────
+    if COOKIE_FILE.exists():
         try:
-            GUI_SENTINEL_FILE.unlink()
+            cookies = json.loads(COOKIE_FILE.read_text(encoding="utf-8"))
+            if cookies:
+                log.info("  ✅  Using saved session cookies.")
+                return cookies
         except Exception:
             pass
-        print("  [GUI login confirmed]")
-    else:
-        input("\n  [Press ENTER after you are logged in] ")
 
-
-def get_cookies() -> list[dict]:
+    # ── Slow path: open browser and log in ────────────────────────────────────
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -66,6 +52,15 @@ def get_cookies() -> list[dict]:
         )
 
     BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
+
+    # Clean up any leftover sentinel from a previous run
+    if GUI_SENTINEL_FILE.exists():
+        try:
+            GUI_SENTINEL_FILE.unlink()
+        except Exception:
+            pass
+
+    in_gui = bool(os.environ.get("CANVAS_ARCHIVE_GUI"))
 
     with sync_playwright() as pw:
         ctx = pw.chromium.launch_persistent_context(
@@ -102,10 +97,32 @@ def get_cookies() -> list[dict]:
             print("  A browser window has just opened.")
             print("  Log in with your university credentials as normal.")
             print("  Once you can see the Canvas dashboard,")
-            print("  come back here and press ENTER.")
+            if in_gui:
+                print("  click the green button in the app to continue.")
+            else:
+                print("  come back here and press ENTER.")
             print("═" * 62)
 
-            _wait_for_login()
+            if in_gui:
+                # GUI mode — poll for sentinel file written by canvas_archive.py
+                print("  [Waiting for GUI login confirmation...]")
+                timeout_seconds = 600   # 10 minutes
+                for _ in range(timeout_seconds * 2):
+                    if GUI_SENTINEL_FILE.exists():
+                        try:
+                            GUI_SENTINEL_FILE.unlink()
+                        except Exception:
+                            pass
+                        break
+                    time.sleep(0.5)
+            else:
+                # Terminal mode — wait for Enter key
+                # Wrap in try/except in case stdin is closed
+                try:
+                    input("\n  [Press ENTER after you are logged in] ")
+                except EOFError:
+                    # stdin was closed — wait a bit and hope they logged in
+                    time.sleep(5)
 
             try:
                 page.wait_for_load_state("networkidle", timeout=20_000)
@@ -119,6 +136,7 @@ def get_cookies() -> list[dict]:
         cookies = ctx.cookies()
         ctx.close()
 
+    # Save cookies so subsequent scripts skip the browser entirely
     COOKIE_FILE.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
     return cookies
 
