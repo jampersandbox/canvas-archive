@@ -94,9 +94,18 @@ def save_config(cfg: dict) -> None:
 
 
 def write_canvas_config(canvas_url: str, panopto_url: str) -> None:
-    (HERE / "canvas_config.py").write_text(
+    # Write .py for scripts that import it
+    (DATA_DIR / "canvas_config.py").write_text(
         f"CANVAS_BASE_URL  = {canvas_url!r}\n"
         f"PANOPTO_BASE_URL = {panopto_url!r}\n",
+        encoding="utf-8",
+    )
+    # Write .json for canvas_auth.py which reads it without importing
+    (DATA_DIR / "canvas_config.json").write_text(
+        json.dumps({
+            "canvas_url":  canvas_url,
+            "panopto_url": panopto_url,
+        }, indent=2),
         encoding="utf-8",
     )
 
