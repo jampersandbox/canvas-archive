@@ -3,36 +3,70 @@
 canvas_auth.py
 ==============
 Handles Canvas login via browser session.
-Works in both terminal mode and GUI mode.
+Works in both terminal mode (press Enter) and GUI mode
+(waits for gui_login_ready.txt sentinel file).
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-try:
-    from canvas_config import CANVAS_BASE_URL as _canvas_url
-    CANVAS_BASE_URL = _canvas_url
-except ImportError:
-    CANVAS_BASE_URL = "https://canvas.harvard.edu"
-
 BROWSER_PROFILE   = Path("./browser_profile")
 COOKIE_FILE       = Path("./canvas_cookies.json")
 GUI_SENTINEL_FILE = Path("./gui_login_ready.txt")
+_CONFIG_FILE      = Path("./canvas_config.json")
+_CONFIG_PY_FILE   = Path("./canvas_config.py")
+
+
+def _get_canvas_base_url() -> str:
+    """
+    Read the Canvas URL from config without importing anything.
+    Falls back to Harvard if no config is found.
+    Checks both canvas_config.json (written by the GUI) and
+    canvas_config.py (written by patch_scripts.py).
+    """
+    # Try JSON config first (written by canvas_archive.py)
+    if _CONFIG_FILE.exists():
+        try:
+            data = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+            url = data.get("canvas_url", "").strip()
+            if url.startswith("http"):
+                return url
+        except Exception:
+            pass
+
+    # Try .py config (written by patch_scripts / old setup)
+    if _CONFIG_PY_FILE.exists():
+        try:
+            content = _CONFIG_PY_FILE.read_text(encoding="utf-8")
+            m = re.search(
+                r'CANVAS_BASE_URL\s*=\s*["\']([^"\']+)["\']', content
+            )
+            if m:
+                url = m.group(1).strip()
+                if url.startswith("http"):
+                    return url
+        except Exception:
+            pass
+
+    # Default fallback
+    return "https://canvas.harvard.edu"
 
 
 def get_cookies() -> list[dict]:
     """
     Get Canvas session cookies.
-    - If saved cookies exist, return them immediately (no browser needed).
-    - Otherwise open a browser and ask the user to log in.
+    Uses saved cookies if available — only opens a browser when needed.
     """
-    # ── Fast path: use saved cookies from a previous run ──────────────────────
+    canvas_base_url = _get_canvas_base_url()
+
+    # ── Fast path: saved cookies ───────────────────────────────────────────────
     if COOKIE_FILE.exists():
         try:
             cookies = json.loads(COOKIE_FILE.read_text(encoding="utf-8"))
@@ -42,7 +76,7 @@ def get_cookies() -> list[dict]:
         except Exception:
             pass
 
-    # ── Slow path: open browser and log in ────────────────────────────────────
+    # ── Slow path: open browser ────────────────────────────────────────────────
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -53,7 +87,7 @@ def get_cookies() -> list[dict]:
 
     BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
 
-    # Clean up any leftover sentinel from a previous run
+    # Clean up any leftover sentinel
     if GUI_SENTINEL_FILE.exists():
         try:
             GUI_SENTINEL_FILE.unlink()
@@ -75,7 +109,7 @@ def get_cookies() -> list[dict]:
 
         try:
             page.goto(
-                f"{CANVAS_BASE_URL}/",
+                f"{canvas_base_url}/",
                 wait_until="domcontentloaded",
                 timeout=30_000,
             )
@@ -86,7 +120,7 @@ def get_cookies() -> list[dict]:
         already_in = (
             "login" not in page.url.lower()
             and "saml"  not in page.url.lower()
-            and CANVAS_BASE_URL.replace("https://", "") in page.url
+            and canvas_base_url.replace("https://", "") in page.url
         )
 
         if not already_in:
@@ -104,10 +138,9 @@ def get_cookies() -> list[dict]:
             print("═" * 62)
 
             if in_gui:
-                # GUI mode — poll for sentinel file written by canvas_archive.py
                 print("  [Waiting for GUI login confirmation...]")
-                timeout_seconds = 600   # 10 minutes
-                for _ in range(timeout_seconds * 2):
+                # Poll for sentinel file for up to 10 minutes
+                for _ in range(1200):
                     if GUI_SENTINEL_FILE.exists():
                         try:
                             GUI_SENTINEL_FILE.unlink()
@@ -116,12 +149,9 @@ def get_cookies() -> list[dict]:
                         break
                     time.sleep(0.5)
             else:
-                # Terminal mode — wait for Enter key
-                # Wrap in try/except in case stdin is closed
                 try:
                     input("\n  [Press ENTER after you are logged in] ")
                 except EOFError:
-                    # stdin was closed — wait a bit and hope they logged in
                     time.sleep(5)
 
             try:
@@ -136,7 +166,6 @@ def get_cookies() -> list[dict]:
         cookies = ctx.cookies()
         ctx.close()
 
-    # Save cookies so subsequent scripts skip the browser entirely
     COOKIE_FILE.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
     return cookies
 
