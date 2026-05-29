@@ -2,29 +2,61 @@
 """
 canvas_auth.py
 ==============
-Handles Canvas login via HarvardKey browser session.
-Imported by both canvas_downloader.py and external_downloader.py.
-Only asks you to log in once — saves the session in ./browser_profile/
-and reuses it on every future run until the session expires.
+Handles Canvas login via browser session.
+Supports both terminal mode (press Enter) and GUI mode
+(waits for a sentinel file written by canvas_archive.py).
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-CANVAS_BASE_URL = "https://canvas.harvard.edu"
-BROWSER_PROFILE = Path("./browser_profile")
-COOKIE_FILE     = Path("./canvas_cookies.json")
+try:
+    from canvas_config import CANVAS_BASE_URL as _canvas_url
+    CANVAS_BASE_URL = _canvas_url
+except ImportError:
+    CANVAS_BASE_URL = "https://canvas.harvard.edu"
+
+BROWSER_PROFILE  = Path("./browser_profile")
+COOKIE_FILE      = Path("./canvas_cookies.json")
+
+# When running inside the GUI, canvas_archive.py creates this file
+# instead of sending Enter via stdin.
+GUI_SENTINEL_FILE = Path("./gui_login_ready.txt")
+
+
+def _wait_for_login():
+    """
+    Wait for the user to finish logging in.
+    - In GUI mode: waits for gui_login_ready.txt to appear
+    - In terminal mode: waits for the user to press Enter
+    """
+    # Clean up any leftover sentinel from a previous run
+    if GUI_SENTINEL_FILE.exists():
+        GUI_SENTINEL_FILE.unlink()
+
+    # Are we running inside the GUI?
+    if os.environ.get("CANVAS_ARCHIVE_GUI"):
+        print("  [Waiting for GUI login confirmation...]")
+        # Poll for the sentinel file every 0.5 seconds
+        while not GUI_SENTINEL_FILE.exists():
+            time.sleep(0.5)
+        # Clean up
+        try:
+            GUI_SENTINEL_FILE.unlink()
+        except Exception:
+            pass
+        print("  [GUI login confirmed]")
+    else:
+        input("\n  [Press ENTER after you are logged in] ")
 
 
 def get_cookies() -> list[dict]:
-    """
-    Open a browser if needed, prompt for HarvardKey login,
-    then return the session cookies for use in API requests.
-    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -68,11 +100,12 @@ def get_cookies() -> list[dict]:
             print("  🔐  Canvas Login Required")
             print()
             print("  A browser window has just opened.")
-            print("  Log in with your HarvardKey as normal.")
+            print("  Log in with your university credentials as normal.")
             print("  Once you can see the Canvas dashboard,")
             print("  come back here and press ENTER.")
             print("═" * 62)
-            input("\n  [Press ENTER after you are logged in] ")
+
+            _wait_for_login()
 
             try:
                 page.wait_for_load_state("networkidle", timeout=20_000)
@@ -91,10 +124,10 @@ def get_cookies() -> list[dict]:
 
 
 def cookies_for_domain(cookies: list[dict], base_url: str) -> str:
-    """
-    Filter cookies to those belonging to base_url's domain and
-    return them formatted as a Cookie: header value.
-    """
-    domain = base_url.replace("https://", "").replace("http://", "").split("/")[0]
+    domain = (
+        base_url.replace("https://", "")
+                .replace("http://", "")
+                .split("/")[0]
+    )
     relevant = [c for c in cookies if domain in c.get("domain", "")]
     return "; ".join(f"{c['name']}={c['value']}" for c in relevant)
