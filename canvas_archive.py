@@ -16,8 +16,6 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 HERE = Path(__file__).parent.resolve()
 
-# ──────────────────────────────  CONSTANTS  ───────────────────────────────────
-
 COMMON_CANVAS_URLS = [
     "https://canvas.harvard.edu",
     "https://canvas.yale.edu",
@@ -72,8 +70,6 @@ _LOGIN_PHRASES = [
 ]
 
 
-# ──────────────────────────────  CONFIG  ──────────────────────────────────────
-
 def load_config() -> dict:
     if CONFIG_FILE.exists():
         try:
@@ -105,8 +101,6 @@ def write_canvas_config(canvas_url: str, panopto_url: str) -> None:
     )
 
 
-# ──────────────────────────────  APP  ─────────────────────────────────────────
-
 class CanvasArchiveApp:
 
     def __init__(self, root: tk.Tk):
@@ -115,11 +109,10 @@ class CanvasArchiveApp:
         self.root.resizable(True, True)
         self.root.configure(bg="#f0f0f0")
 
-        # Size the window to 90% of screen height so it always fits
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         w  = min(920, int(sw * 0.92))
-        h  = min(820, int(sh * 0.88))
+        h  = min(800, int(sh * 0.88))
         x  = (sw - w) // 2
         y  = (sh - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -143,7 +136,7 @@ class CanvasArchiveApp:
         self.process:           subprocess.Popen | None = None
         self.log_queue:         queue.Queue = queue.Queue()
         self.script_queue:      list[tuple[str, list[str]]] = []
-        self._login_bar_visible = False
+        self._login_popup:      tk.Toplevel | None = None
         self._dot_job:          str | None = None
 
         if SENTINEL_FILE.exists():
@@ -155,7 +148,7 @@ class CanvasArchiveApp:
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Fixed header (always visible at top) ──────────────────────────────
+        # Fixed header
         header = tk.Frame(self.root, bg="#4a148c", pady=12)
         header.pack(fill="x", side="top")
         tk.Label(
@@ -171,7 +164,7 @@ class CanvasArchiveApp:
             fg="#e1bee7", bg="#4a148c",
         ).pack(pady=(1, 0))
 
-        # ── Fixed bottom controls (always visible at bottom) ──────────────────
+        # Fixed bottom controls
         ctrl = tk.Frame(self.root, bg="#e8e8e8", pady=10, padx=20)
         ctrl.pack(fill="x", side="bottom")
 
@@ -202,7 +195,7 @@ class CanvasArchiveApp:
         )
         self.stop_btn.pack(side="left")
 
-        # ── Fixed status bar (just above bottom controls) ─────────────────────
+        # Fixed status bar
         self.status_frame = tk.Frame(
             self.root, bg="#d0d0d0", pady=5, padx=20
         )
@@ -219,57 +212,41 @@ class CanvasArchiveApp:
         )
         self.status_label.pack(fill="x")
 
-        # ── Scrollable middle section ─────────────────────────────────────────
-        # Everything between header and bottom controls goes in a
-        # scrollable canvas so the app works on any screen size.
+        # Scrollable middle
         scroll_container = tk.Frame(self.root, bg="#f0f0f0")
         scroll_container.pack(fill="both", expand=True, side="top")
 
         self._canvas = tk.Canvas(
-            scroll_container, bg="#f0f0f0",
-            highlightthickness=0,
+            scroll_container, bg="#f0f0f0", highlightthickness=0
         )
         scrollbar = ttk.Scrollbar(
-            scroll_container,
-            orient="vertical",
+            scroll_container, orient="vertical",
             command=self._canvas.yview,
         )
         self._canvas.configure(yscrollcommand=scrollbar.set)
-
         scrollbar.pack(side="right", fill="y")
         self._canvas.pack(side="left", fill="both", expand=True)
 
-        # Inner frame that holds all the widgets
         self.main = tk.Frame(self._canvas, bg="#f0f0f0", padx=20, pady=10)
         self._canvas_window = self._canvas.create_window(
             (0, 0), window=self.main, anchor="nw"
         )
-
-        # Make the inner frame resize with the canvas width
         self._canvas.bind("<Configure>", self._on_canvas_resize)
         self.main.bind("<Configure>", self._on_frame_configure)
+        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-4>",   self._on_mousewheel)
+        self._canvas.bind_all("<Button-5>",   self._on_mousewheel)
 
-        # Mouse wheel scrolling
-        self._canvas.bind_all("<MouseWheel>",      self._on_mousewheel)
-        self._canvas.bind_all("<Button-4>",        self._on_mousewheel)
-        self._canvas.bind_all("<Button-5>",        self._on_mousewheel)
-
-        # ── Build widgets inside self.main ────────────────────────────────────
         self._build_settings()
         self._build_what_to_download()
         self._build_options()
-        self._build_login_banner()
         self._build_log()
 
     def _on_canvas_resize(self, event):
-        self._canvas.itemconfig(
-            self._canvas_window, width=event.width
-        )
+        self._canvas.itemconfig(self._canvas_window, width=event.width)
 
     def _on_frame_configure(self, event):
-        self._canvas.configure(
-            scrollregion=self._canvas.bbox("all")
-        )
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
     def _on_mousewheel(self, event):
         if event.num == 4:
@@ -280,10 +257,6 @@ class CanvasArchiveApp:
             self._canvas.yview_scroll(
                 int(-1 * (event.delta / 120)), "units"
             )
-
-    def _scroll_to_bottom(self):
-        """Scroll the middle panel to the bottom (shows login banner)."""
-        self._canvas.yview_moveto(1.0)
 
     def _build_settings(self):
         sf = ttk.LabelFrame(self.main, text=" ⚙️  Settings ", padding=10)
@@ -360,46 +333,6 @@ class CanvasArchiveApp:
             variable=self.skip_videos,
         ).pack(side="left")
 
-    def _build_login_banner(self):
-        # Built but NOT packed yet — shown dynamically
-        self.login_frame = tk.Frame(
-            self.main, bg="#fff3cd", pady=12, padx=14,
-            relief="solid", bd=2,
-        )
-
-        tk.Label(
-            self.login_frame,
-            text="🔐  Login required",
-            font=("Helvetica", 13, "bold"),
-            bg="#fff3cd", fg="#856404",
-        ).pack(anchor="w")
-
-        tk.Label(
-            self.login_frame,
-            text=(
-                "A browser window has opened.\n"
-                "Please log in with your university credentials.\n"
-                "Once you can see your Canvas dashboard, "
-                "click the button below."
-            ),
-            font=("Helvetica", 11),
-            bg="#fff3cd", fg="#533f03",
-            justify="left",
-        ).pack(anchor="w", pady=(4, 8))
-
-        self._login_btn = tk.Button(
-            self.login_frame,
-            text="  ✅  I'm logged in — continue downloading  ",
-            font=("Helvetica", 13, "bold"),
-            bg="#28a745", fg="white",
-            activebackground="#218838",
-            activeforeground="white",
-            relief="raised", bd=3,
-            cursor="hand2",
-            command=self._confirm_login,
-        )
-        self._login_btn.pack(anchor="w")
-
     def _build_log(self):
         lf = ttk.LabelFrame(
             self.main, text=" 📋  Progress log ", padding=6
@@ -408,7 +341,7 @@ class CanvasArchiveApp:
 
         self.log_text = scrolledtext.ScrolledText(
             lf,
-            height=10,
+            height=14,
             font=("Courier", 10),
             bg="#1e1e1e", fg="#d4d4d4",
             insertbackground="white",
@@ -427,61 +360,101 @@ class CanvasArchiveApp:
         ]:
             self.log_text.tag_config(tag, foreground=colour)
 
-    # ── Login banner ──────────────────────────────────────────────────────────
+    # ── Login POPUP (replaces banner — always visible) ────────────────────────
 
-    def _show_login_bar(self):
-        if self._login_bar_visible:
+    def _show_login_popup(self):
+        """
+        Show a standalone popup window for login confirmation.
+        This is ALWAYS visible regardless of scroll position —
+        it floats above everything else on screen.
+        """
+        if self._login_popup is not None:
+            # Already showing — just bring it to front
+            try:
+                self._login_popup.lift()
+                self._login_popup.focus_force()
+            except Exception:
+                pass
             return
-        self._login_bar_visible = True
-        self._login_btn.config(state="normal", bg="#28a745")
 
-        # Insert the banner ABOVE the log so it's always visible
-        self.login_frame.pack(
-            fill="x", pady=(0, 8),
-            before=self.log_text.master,
+        popup = tk.Toplevel(self.root)
+        popup.title("🔐  Login Required")
+        popup.configure(bg="#fff3cd")
+        popup.resizable(False, False)
+
+        # Size and centre the popup
+        pw, ph = 520, 260
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        px = (sw - pw) // 2
+        py = (sh - ph) // 2
+        popup.geometry(f"{pw}x{ph}+{px}+{py}")
+
+        # Always on top
+        popup.attributes("-topmost", True)
+        popup.lift()
+
+        # Prevent closing with the X button
+        popup.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        self._login_popup = popup
+
+        # Content
+        tk.Label(
+            popup,
+            text="🔐  Login Required",
+            font=("Helvetica", 16, "bold"),
+            bg="#fff3cd", fg="#856404",
+        ).pack(pady=(24, 8))
+
+        tk.Label(
+            popup,
+            text=(
+                "A browser window has opened.\n"
+                "Please log in with your university credentials.\n\n"
+                "Once you can see your Canvas dashboard,\n"
+                "click the button below."
+            ),
+            font=("Helvetica", 12),
+            bg="#fff3cd", fg="#533f03",
+            justify="center",
+        ).pack(pady=(0, 16))
+
+        confirm_btn = tk.Button(
+            popup,
+            text="  ✅  I'm logged in — continue downloading  ",
+            font=("Helvetica", 14, "bold"),
+            bg="#28a745", fg="white",
+            activebackground="#218838",
+            activeforeground="white",
+            relief="raised", bd=3,
+            cursor="hand2",
+            padx=10, pady=8,
+            command=self._confirm_login,
         )
+        confirm_btn.pack()
 
-        # Scroll up so the banner is visible
-        self.root.after(100, self._scroll_to_banner)
-
-        # Bring app to front
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.root.after(300, lambda: self.root.attributes("-topmost", False))
-        self.root.focus_force()
-
+        popup.focus_force()
         self._set_status(
-            "⏸  Login required — see the banner in the app",
+            "⏸  Waiting for login — click the green button in the popup",
             "#856404", "#fff3cd",
         )
 
-    def _scroll_to_banner(self):
-        """Scroll so the login banner is visible."""
-        self.root.update_idletasks()
-        # Get the banner's position in the canvas
-        try:
-            y = self.login_frame.winfo_y()
-            canvas_h = self._canvas.winfo_height()
-            frame_h  = self.main.winfo_height()
-            if frame_h > 0:
-                fraction = max(0.0, (y - 20) / frame_h)
-                self._canvas.yview_moveto(fraction)
-        except Exception:
-            pass
-
-    def _hide_login_bar(self):
-        if not self._login_bar_visible:
-            return
-        self._login_bar_visible = False
-        self.login_frame.pack_forget()
+    def _close_login_popup(self):
+        if self._login_popup is not None:
+            try:
+                self._login_popup.destroy()
+            except Exception:
+                pass
+            self._login_popup = None
 
     def _confirm_login(self):
-        self._login_btn.config(state="disabled", bg="#6c757d")
+        """Write sentinel file and close the popup."""
         try:
             SENTINEL_FILE.write_text("ready", encoding="utf-8")
         except Exception as exc:
             self._log(f"  ⚠  Could not write sentinel: {exc}\n", "warn")
-        self._hide_login_bar()
+        self._close_login_popup()
         self._log("  ✅  Login confirmed — continuing…\n\n", "success")
         self._set_status("Continuing download…", "#155724", "#d4edda")
 
@@ -502,7 +475,7 @@ class CanvasArchiveApp:
         self._animate_dots()
 
     def _animate_dots(self):
-        if not self.running or self._login_bar_visible:
+        if not self.running or self._login_popup is not None:
             return
         self._dot_count = (self._dot_count + 1) % 4
         self._set_status(
@@ -590,9 +563,9 @@ class CanvasArchiveApp:
         if SENTINEL_FILE.exists():
             SENTINEL_FILE.unlink()
 
-        self.running            = True
-        self._login_bar_visible = False
-        self._hide_login_bar()
+        self.running    = True
+        self._login_popup = None
+        self._close_login_popup()
         self._clear_log()
 
         self.start_btn.config(state="disabled", bg="#888888")
@@ -611,6 +584,7 @@ class CanvasArchiveApp:
     def _stop(self):
         self.running = False
         self._stop_dots()
+        self._close_login_popup()
 
         if self.process:
             try:
@@ -618,8 +592,6 @@ class CanvasArchiveApp:
             except Exception:
                 pass
             self.process = None
-
-        self._hide_login_bar()
 
         if SENTINEL_FILE.exists():
             try:
@@ -716,7 +688,7 @@ class CanvasArchiveApp:
         self.running = False
         self.process = None
         self._stop_dots()
-        self._hide_login_bar()
+        self._close_login_popup()
 
         if SENTINEL_FILE.exists():
             try:
@@ -791,15 +763,16 @@ class CanvasArchiveApp:
 
                     self._log(line, tag)
 
+                    # Show LOGIN POPUP when a login prompt is detected
                     if any(p in line for p in _LOGIN_PHRASES):
-                        if not self._login_bar_visible:
+                        if self._login_popup is None:
                             self._stop_dots()
-                            self.root.after(300, self._show_login_bar)
+                            self.root.after(300, self._show_login_popup)
 
                 elif kind == "done":
                     rc = data
                     self._stop_dots()
-                    self._hide_login_bar()
+                    self._close_login_popup()
                     if rc == 0:
                         self._log(
                             "  ✓  Step complete.\n", "success"
@@ -857,8 +830,6 @@ def check_packages() -> bool:
         return False
     return True
 
-
-# ──────────────────────────────────  MAIN  ────────────────────────────────────
 
 def main():
     if not check_setup():
