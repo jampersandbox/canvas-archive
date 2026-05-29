@@ -3,13 +3,10 @@
 canvas_archive.py
 =================
 One-click Canvas course archiver with a simple graphical interface.
-Double-click the launcher created by setup_mac.sh / setup_windows.bat
-— or run:  python canvas_archive.py
 """
 import json
 import os
 import queue
-import re
 import subprocess
 import sys
 import threading
@@ -47,7 +44,7 @@ COMMON_CANVAS_URLS = [
     "https://canvas.wustl.edu",
 ]
 
-CONFIG_FILE = HERE / "canvas_config.json"
+CONFIG_FILE   = HERE / "canvas_config.json"
 SENTINEL_FILE = HERE / "gui_login_ready.txt"
 
 REQUIRED_SCRIPTS = [
@@ -58,7 +55,6 @@ REQUIRED_SCRIPTS = [
     "reserves_downloader.py",
 ]
 
-# Phrases in script output that mean "please log in and confirm"
 _LOGIN_PHRASES = [
     "Press ENTER",
     "press ENTER",
@@ -116,7 +112,7 @@ class CanvasArchiveApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Canvas Archive  🎓")
-        self.root.geometry("900x780")
+        self.root.geometry("920x800")
         self.root.resizable(True, True)
         self.root.configure(bg="#f0f0f0")
 
@@ -135,14 +131,13 @@ class CanvasArchiveApp:
         self.do_panopto   = tk.BooleanVar(value=self._cfg["do_panopto"])
         self.do_reserves  = tk.BooleanVar(value=self._cfg["do_reserves"])
 
-        self.running       = False
-        self.process:      subprocess.Popen | None = None
-        self.log_queue:    queue.Queue = queue.Queue()
-        self.script_queue: list[tuple[str, list[str]]] = []
-
+        self.running            = False
+        self.process:           subprocess.Popen | None = None
+        self.log_queue:         queue.Queue = queue.Queue()
+        self.script_queue:      list[tuple[str, list[str]]] = []
         self._login_bar_visible = False
+        self._dot_job:          str | None = None   # for animated dots
 
-        # Clean up any leftover sentinel from a previous run
         if SENTINEL_FILE.exists():
             SENTINEL_FILE.unlink()
 
@@ -152,17 +147,15 @@ class CanvasArchiveApp:
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Header ────────────────────────────────────────────────────────────
+        # Header
         header = tk.Frame(self.root, bg="#4a148c", pady=18)
         header.pack(fill="x")
-
         tk.Label(
             header,
             text="🎓  Canvas Archive",
             font=("Helvetica", 24, "bold"),
             fg="white", bg="#4a148c",
         ).pack()
-
         tk.Label(
             header,
             text="Save all your course materials before you lose access",
@@ -170,11 +163,10 @@ class CanvasArchiveApp:
             fg="#e1bee7", bg="#4a148c",
         ).pack(pady=(2, 0))
 
-        # ── Main area ─────────────────────────────────────────────────────────
         self.main = tk.Frame(self.root, bg="#f0f0f0", padx=24, pady=12)
         self.main.pack(fill="both", expand=True)
 
-        # ── Settings ──────────────────────────────────────────────────────────
+        # Settings
         sf = ttk.LabelFrame(self.main, text=" ⚙️  Settings ", padding=14)
         sf.pack(fill="x", pady=(0, 10))
 
@@ -205,7 +197,7 @@ class CanvasArchiveApp:
             command=self._browse_dir,
         ).pack(side="left", padx=4)
 
-        # ── What to download ──────────────────────────────────────────────────
+        # What to download
         wf = ttk.LabelFrame(
             self.main, text=" 📥  What to download ", padding=14
         )
@@ -233,7 +225,7 @@ class CanvasArchiveApp:
                 fg="#666", bg="white", font=("Helvetica", 9),
             ).pack(side="left")
 
-        # ── Options ───────────────────────────────────────────────────────────
+        # Options
         of = ttk.LabelFrame(self.main, text=" 🔧  Options ", padding=14)
         of.pack(fill="x", pady=(0, 10))
         opts = tk.Frame(of, bg="white")
@@ -249,24 +241,17 @@ class CanvasArchiveApp:
             variable=self.skip_videos,
         ).pack(side="left")
 
-        # ── Login banner (hidden until needed) ────────────────────────────────
+        # Login banner (hidden until needed)
         self.login_frame = tk.Frame(
-            self.main,
-            bg="#fff3cd",
-            pady=14,
-            padx=16,
-            relief="solid",
-            bd=2,
+            self.main, bg="#fff3cd", pady=14, padx=16,
+            relief="solid", bd=2,
         )
-        # Not packed yet — shown dynamically
-
         tk.Label(
             self.login_frame,
             text="🔐  Login required",
             font=("Helvetica", 13, "bold"),
             bg="#fff3cd", fg="#856404",
         ).pack(anchor="w")
-
         tk.Label(
             self.login_frame,
             text=(
@@ -279,7 +264,6 @@ class CanvasArchiveApp:
             bg="#fff3cd", fg="#533f03",
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
-
         self._login_btn = tk.Button(
             self.login_frame,
             text="  ✅  I'm logged in — continue downloading  ",
@@ -293,9 +277,9 @@ class CanvasArchiveApp:
         )
         self._login_btn.pack(anchor="w")
 
-        # ── Log ───────────────────────────────────────────────────────────────
+        # Log
         lf = ttk.LabelFrame(self.main, text=" 📋  Progress log ", padding=8)
-        lf.pack(fill="both", expand=True, pady=(0, 10))
+        lf.pack(fill="both", expand=True, pady=(0, 6))
 
         self.log_text = scrolledtext.ScrolledText(
             lf,
@@ -318,34 +302,53 @@ class CanvasArchiveApp:
         ]:
             self.log_text.tag_config(tag, foreground=colour)
 
-        # ── Bottom controls ───────────────────────────────────────────────────
+        # Status bar (sits between log and bottom controls)
+        self.status_frame = tk.Frame(
+            self.root, bg="#d0d0d0", pady=6, padx=24
+        )
+        self.status_frame.pack(fill="x")
+        self.status_var = tk.StringVar(
+            value="Ready — click 'Start Download' to begin."
+        )
+        self.status_label = tk.Label(
+            self.status_frame,
+            textvariable=self.status_var,
+            fg="#222", bg="#d0d0d0",
+            font=("Helvetica", 11, "bold"),
+            anchor="w",
+        )
+        self.status_label.pack(fill="x")
+
+        # Bottom controls
         ctrl = tk.Frame(self.root, bg="#e8e8e8", pady=12, padx=24)
         ctrl.pack(fill="x")
 
-        self.start_btn = ttk.Button(
+        self.start_btn = tk.Button(
             ctrl,
             text="▶   Start Download",
+            font=("Helvetica", 13, "bold"),
+            bg="#4a148c", fg="white",
+            activebackground="#6a1fbc",
+            activeforeground="white",
+            relief="raised", bd=3,
+            cursor="hand2",
+            padx=16, pady=8,
             command=self._start,
         )
         self.start_btn.pack(side="left", padx=(0, 12))
 
-        self.stop_btn = ttk.Button(
+        self.stop_btn = tk.Button(
             ctrl,
             text="⏹  Stop",
-            command=self._stop,
+            font=("Helvetica", 12),
+            bg="#cccccc", fg="#444444",
+            relief="raised", bd=2,
+            cursor="hand2",
+            padx=12, pady=8,
             state="disabled",
+            command=self._stop,
         )
         self.stop_btn.pack(side="left")
-
-        self.status_var = tk.StringVar(
-            value="Ready — click 'Start Download' to begin."
-        )
-        tk.Label(
-            ctrl,
-            textvariable=self.status_var,
-            fg="#444", bg="#e8e8e8",
-            font=("Helvetica", 10),
-        ).pack(side="left", padx=20)
 
     # ── Login banner ──────────────────────────────────────────────────────────
 
@@ -354,15 +357,14 @@ class CanvasArchiveApp:
             return
         self._login_bar_visible = True
         self._login_btn.config(state="normal", bg="#28a745")
-        # Insert the login banner just before the log frame
         self.login_frame.pack(fill="x", pady=(0, 10))
-        # Bring app to front
         self.root.lift()
         self.root.attributes("-topmost", True)
-        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        self.root.after(300, lambda: self.root.attributes("-topmost", False))
         self.root.focus_force()
-        self.status_var.set(
-            "⏸  Waiting for you to log in — see the banner above."
+        self._set_status(
+            "⏸  Waiting for login — click the green button above",
+            "#856404", "#fff3cd",
         )
 
     def _hide_login_bar(self):
@@ -372,21 +374,46 @@ class CanvasArchiveApp:
         self.login_frame.pack_forget()
 
     def _confirm_login(self):
-        """
-        User clicked 'I'm logged in'.
-        Write the sentinel file that canvas_auth.py is watching for.
-        """
         self._login_btn.config(state="disabled", bg="#6c757d")
-        # Write sentinel file — canvas_auth.py polls for this
         try:
             SENTINEL_FILE.write_text("ready", encoding="utf-8")
         except Exception as exc:
             self._log(f"  ⚠  Could not write sentinel: {exc}\n", "warn")
         self._hide_login_bar()
-        self._log(
-            "  ✅  Login confirmed — continuing…\n\n", "success"
+        self._log("  ✅  Login confirmed — continuing…\n\n", "success")
+        self._set_status("Continuing download…", "#155724", "#d4edda")
+
+    # ── Status bar helpers ────────────────────────────────────────────────────
+
+    def _set_status(self, text: str,
+                    fg: str = "#222", bg: str = "#d0d0d0"):
+        self.status_var.set(text)
+        self.status_label.config(fg=fg)
+        self.status_frame.config(bg=bg)
+        self.status_label.config(bg=bg)
+
+    # ── Animated dots while running ───────────────────────────────────────────
+
+    def _start_dots(self, base_text: str):
+        self._dot_base = base_text
+        self._dot_count = 0
+        self._animate_dots()
+
+    def _animate_dots(self):
+        if not self.running or self._login_bar_visible:
+            return
+        self._dot_count = (self._dot_count + 1) % 4
+        dots = "." * self._dot_count
+        self._set_status(
+            f"⏳  {self._dot_base}{dots}",
+            "#0c5460", "#d1ecf1",
         )
-        self.status_var.set("Continuing download…")
+        self._dot_job = self.root.after(600, self._animate_dots)
+
+    def _stop_dots(self):
+        if self._dot_job:
+            self.root.after_cancel(self._dot_job)
+            self._dot_job = None
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -459,16 +486,20 @@ class CanvasArchiveApp:
 
         Path(out).mkdir(parents=True, exist_ok=True)
 
-        # Clean up any leftover sentinel
         if SENTINEL_FILE.exists():
             SENTINEL_FILE.unlink()
 
         self.running = True
         self._login_bar_visible = False
-        self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
         self._hide_login_bar()
         self._clear_log()
+
+        # Visual: disable Start, enable Stop with red colour
+        self.start_btn.config(state="disabled", bg="#888888")
+        self.stop_btn.config(
+            state="normal", bg="#c0392b", fg="white",
+            text="⏹  Stop",
+        )
 
         self._log("═" * 58 + "\n", "header")
         self._log("  🎓  Canvas Archive — Starting\n", "header")
@@ -479,19 +510,39 @@ class CanvasArchiveApp:
 
     def _stop(self):
         self.running = False
+        self._stop_dots()
+
         if self.process:
             try:
                 self.process.terminate()
             except Exception:
                 pass
             self.process = None
+
         self._hide_login_bar()
+
         if SENTINEL_FILE.exists():
-            SENTINEL_FILE.unlink()
-        self.start_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-        self.status_var.set("Stopped.")
-        self._log("\n⏹  Download stopped.\n", "warn")
+            try:
+                SENTINEL_FILE.unlink()
+            except Exception:
+                pass
+
+        # Visual: clearly show stopped state
+        self.start_btn.config(
+            state="normal", bg="#4a148c", fg="white",
+            text="▶   Start Download",
+        )
+        self.stop_btn.config(
+            state="disabled", bg="#cccccc", fg="#444444",
+            text="⏹  Stop",
+        )
+        self._set_status(
+            "⏹  Download stopped — click Start to begin again.",
+            "#721c24", "#f8d7da",
+        )
+        self._log("\n" + "─" * 58 + "\n", "dim")
+        self._log("  ⏹  Download stopped.\n", "warn")
+        self._log("─" * 58 + "\n", "dim")
 
     def _run_next_script(self):
         if not self.running:
@@ -511,27 +562,33 @@ class CanvasArchiveApp:
             return
 
         friendly = {
-            "canvas_downloader.py":   "Downloading course files…",
-            "external_downloader.py": "Downloading external readings…",
-            "panopto_downloader.py":  "Downloading lecture recordings…",
-            "reserves_downloader.py": "Downloading library reserves…",
-        }.get(script_name, f"Running {script_name}…")
+            "canvas_downloader.py":   "Downloading course files",
+            "external_downloader.py": "Downloading external readings",
+            "panopto_downloader.py":  "Downloading lecture recordings",
+            "reserves_downloader.py": "Downloading library reserves",
+        }.get(script_name, f"Running {script_name}")
 
-        self.status_var.set(friendly)
+        self._stop_dots()
+        self._start_dots(friendly)
+
         self._log(f"\n{'─' * 58}\n", "dim")
-        self._log(f"  ▶  {friendly}\n", "info")
+        self._log(f"  ▶  {friendly}…\n", "info")
         self._log(f"{'─' * 58}\n", "dim")
 
-        # Pass CANVAS_ARCHIVE_GUI=1 so canvas_auth.py uses sentinel file
+        # KEY FIX: PYTHONUNBUFFERED=1 forces Python to flush output
+        # immediately so every line appears in the GUI in real time.
         env = os.environ.copy()
-        env["CANVAS_ARCHIVE_GUI"] = "1"
+        env["CANVAS_ARCHIVE_GUI"]  = "1"
+        env["PYTHONUNBUFFERED"]    = "1"   # ← THE FIX
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         try:
             self.process = subprocess.Popen(
-                [sys.executable, str(script_path)] + args,
+                [sys.executable, "-u", str(script_path)] + args,
+                # -u flag also forces unbuffered output
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,  # not needed — using sentinel file
+                stdin=subprocess.DEVNULL,
                 bufsize=1,
                 universal_newlines=True,
                 cwd=str(HERE),
@@ -544,9 +601,18 @@ class CanvasArchiveApp:
             self.root.after(500, self._run_next_script)
             return
 
+        # Confirm in the log that the script actually started
+        self._log(
+            f"  ⚙  Started {script_name} "
+            f"(PID {self.process.pid})\n", "dim"
+        )
+
         def _reader():
-            for line in self.process.stdout:
-                self.log_queue.put(("line", line))
+            try:
+                for line in self.process.stdout:
+                    self.log_queue.put(("line", line))
+            except Exception:
+                pass
             self.process.wait()
             self.log_queue.put(("done", self.process.returncode))
 
@@ -555,13 +621,28 @@ class CanvasArchiveApp:
     def _all_done(self):
         self.running = False
         self.process = None
+        self._stop_dots()
         self._hide_login_bar()
+
         if SENTINEL_FILE.exists():
-            SENTINEL_FILE.unlink()
-        self.start_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
+            try:
+                SENTINEL_FILE.unlink()
+            except Exception:
+                pass
+
+        self.start_btn.config(
+            state="normal", bg="#4a148c", fg="white",
+            text="▶   Start Download",
+        )
+        self.stop_btn.config(
+            state="disabled", bg="#cccccc", fg="#444444",
+        )
+
         out = self.output_dir.get()
-        self.status_var.set(f"✅  All done!  Files saved to: {out}")
+        self._set_status(
+            "✅  All done!  Click Start to run again.",
+            "#155724", "#d4edda",
+        )
         self._log("\n" + "═" * 58 + "\n", "success")
         self._log("  ✅  All downloads complete!\n", "success")
         self._log(f"  📁  Files saved to:\n      {out}\n", "success")
@@ -586,7 +667,6 @@ class CanvasArchiveApp:
         self.log_text.config(state="disabled")
 
     def _poll_log(self):
-        """Drain the log queue — called every 100 ms."""
         try:
             while True:
                 kind, data = self.log_queue.get_nowait()
@@ -594,18 +674,21 @@ class CanvasArchiveApp:
                 if kind == "line":
                     line = data
 
-                    # Choose colour
                     if any(c in line for c in
-                           ("✓", "FINISHED", "Downloaded", "complete")):
+                           ("✓", "FINISHED", "Downloaded",
+                            "complete", "✅")):
                         tag = "success"
                     elif any(c in line for c in
-                             ("✗", "FAILED", "Error", "error")):
+                             ("✗", "FAILED", "Error", "error",
+                              "Traceback", "Exception")):
                         tag = "error"
                     elif any(c in line for c in
-                             ("⚠", "WARNING", "timed out", "Waiting")):
+                             ("⚠", "WARNING", "timed out",
+                              "Waiting", "skipped")):
                         tag = "warn"
                     elif any(c in line for c in
-                             ("═", "─", "📚", "📹", "📖", "🎓", "🌐")):
+                             ("═", "─", "📚", "📹", "📖",
+                              "🎓", "🌐", "▶", "⚙")):
                         tag = "header"
                     elif any(p in line for p in _LOGIN_PHRASES):
                         tag = "login"
@@ -614,18 +697,18 @@ class CanvasArchiveApp:
 
                     self._log(line, tag)
 
-                    # Show login banner when a login prompt is detected
+                    # Show login banner
                     if any(p in line for p in _LOGIN_PHRASES):
                         if not self._login_bar_visible:
+                            self._stop_dots()
                             self.root.after(300, self._show_login_bar)
 
                 elif kind == "done":
                     rc = data
+                    self._stop_dots()
                     self._hide_login_bar()
                     if rc == 0:
-                        self._log(
-                            "  ✓  Step complete.\n", "success"
-                        )
+                        self._log("  ✓  Step complete.\n", "success")
                     else:
                         self._log(
                             f"  ⚠  Finished with exit code {rc}.\n",
@@ -690,7 +773,7 @@ def main():
 
     root = tk.Tk()
     root.update_idletasks()
-    w, h = 900, 780
+    w, h = 920, 800
     x = (root.winfo_screenwidth()  - w) // 2
     y = (root.winfo_screenheight() - h) // 2
     root.geometry(f"{w}x{h}+{x}+{y}")
