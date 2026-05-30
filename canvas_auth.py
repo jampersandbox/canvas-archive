@@ -147,12 +147,19 @@ def get_cookies() -> list[dict]:
         except Exception:
             pass
 
-        already_in = (
-            "login" not in page.url.lower()
-            and "saml"  not in page.url.lower()
-            and canvas_base_url.replace("https://", "") in page.url
-        )
+        # Give the page a moment to settle before checking login state
+        import time as _time
+        _time.sleep(2)
 
+        already_in = (
+            "login"       not in page.url.lower()
+            and "saml"    not in page.url.lower()
+            and "sign_in" not in page.url.lower()
+            and "shibboleth" not in page.url.lower()
+            and canvas_base_url.replace("https://", "") in page.url
+            and bool(ctx.cookies())   # must have cookies to be truly logged in
+        )
+        
         if not already_in:
             print()
             print("═" * 62)
