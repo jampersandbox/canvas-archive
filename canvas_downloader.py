@@ -49,7 +49,11 @@ except ImportError:
 
 # ──────────────────────────────  CONFIGURATION  ───────────────────────────────
 
-CANVAS_BASE_URL = "https://canvas.harvard.edu"
+try:
+    from canvas_config import CANVAS_BASE_URL as _canvas_url
+    CANVAS_BASE_URL = _canvas_url
+except ImportError:
+    CANVAS_BASE_URL = "https://canvas.harvard.edu"
 COOKIES: list[dict] = []          # filled in at startup by canvas_auth.py
 DOWNLOAD_DIR    = Path("./canvas_downloads")
 REQUEST_DELAY   = 0.20            # seconds between API calls — be polite

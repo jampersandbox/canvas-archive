@@ -58,7 +58,11 @@ except ImportError:
 
 # ──────────────────────────────  CONFIGURATION  ───────────────────────────────
 
-CANVAS_BASE_URL = "https://canvas.harvard.edu"
+try:
+    from canvas_config import CANVAS_BASE_URL as _canvas_url
+    CANVAS_BASE_URL = _canvas_url
+except ImportError:
+    CANVAS_BASE_URL = "https://canvas.harvard.edu"
 COOKIES: list[dict] = []          # filled in at startup by canvas_auth.py
 DOWNLOAD_DIR    = Path("./canvas_downloads")
 BROWSER_PROFILE = Path("./browser_profile")
@@ -458,7 +462,10 @@ class BrowserDownloader:
         log.info(f"      The browser window is open.")
         log.info(f"      Please sign in, then come back here and press ENTER.")
         log.info(f"  {'═' * 62}")
-        input("  [Press ENTER once you're signed in and on the content page] ")
+        from canvas_auth import wait_for_login_ready
+        wait_for_login_ready(
+            "  [Press ENTER once you're signed in and on the content page] "
+        )
 
         try:
             page.wait_for_load_state("networkidle", timeout=15_000)

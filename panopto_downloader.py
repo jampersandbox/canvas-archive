@@ -40,7 +40,13 @@ except ImportError:
 
 # ──────────────────────────────  CONFIGURATION  ───────────────────────────────
 
-CANVAS_BASE_URL  = "https://canvas.harvard.edu"
+try:
+    from canvas_config import CANVAS_BASE_URL as _canvas_url, PANOPTO_BASE_URL as _pu
+    CANVAS_BASE_URL = _canvas_url
+    PANOPTO_BASE_URL = _pu
+except ImportError:
+    CANVAS_BASE_URL  = "https://canvas.harvard.edu"
+    PANOPTO_BASE_URL = "https://harvard.hosted.panopto.com"
 PANOPTO_BASE_URL = "https://harvard.hosted.panopto.com"
 
 # Two separate cookie stores — CANVAS_COOKIES is never overwritten by browser
@@ -476,7 +482,8 @@ class PanoptoBrowser:
         print("      Sign in in the browser window,")
         print("      then come back here and press ENTER.")
         print("═" * 62)
-        input("  [Press ENTER once signed in] ")
+        from canvas_auth import wait_for_login_ready
+        wait_for_login_ready("  [Press ENTER once signed in] ")
         try:
             self._page.wait_for_load_state("networkidle", timeout=20_000)
         except PWTimeout:

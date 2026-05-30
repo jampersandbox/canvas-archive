@@ -59,6 +59,36 @@ def _get_canvas_base_url() -> str:
     return "https://canvas.harvard.edu"
 
 
+def wait_for_login_ready(
+    prompt: str = "  [Press ENTER once signed in] ",
+    timeout_minutes: int = 10,
+) -> None:
+    """
+    Block until the user signals that they have finished signing in.
+
+    Under the Canvas Archive GUI (CANVAS_ARCHIVE_GUI=1), the parent process
+    spawns scripts with stdin closed, so input() would raise EOFError
+    immediately. Instead, poll for the sentinel file the GUI writes when
+    the user clicks the login popup's button. In terminal mode, fall back
+    to input().
+    """
+    if os.environ.get("CANVAS_ARCHIVE_GUI"):
+        print("  [Waiting for GUI login confirmation...]", flush=True)
+        for _ in range(timeout_minutes * 120):
+            if GUI_SENTINEL_FILE.exists():
+                try:
+                    GUI_SENTINEL_FILE.unlink()
+                except Exception:
+                    pass
+                return
+            time.sleep(0.5)
+        return
+    try:
+        input(prompt)
+    except EOFError:
+        time.sleep(5)
+
+
 def get_cookies() -> list[dict]:
     """
     Get Canvas session cookies.

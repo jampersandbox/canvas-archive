@@ -71,12 +71,7 @@ _LOGIN_PHRASES = [
 
 
 def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {
+    defaults = {
         "canvas_url":   "https://canvas.harvard.edu",
         "panopto_url":  "https://harvard.hosted.panopto.com",
         "output_dir":   str(Path.home() / "Documents" / "canvas_downloads"),
@@ -87,6 +82,14 @@ def load_config() -> dict:
         "do_panopto":   True,
         "do_reserves":  True,
     }
+    if CONFIG_FILE.exists():
+        try:
+            saved = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                defaults.update(saved)
+        except Exception:
+            pass
+    return defaults
 
 
 def save_config(cfg: dict) -> None:
@@ -94,18 +97,13 @@ def save_config(cfg: dict) -> None:
 
 
 def write_canvas_config(canvas_url: str, panopto_url: str) -> None:
-    # Write .py for scripts that import it
-    (DATA_DIR / "canvas_config.py").write_text(
+    # Write .py for scripts that import it. canvas_auth.py reads URLs from
+    # canvas_config.json directly, which save_config() already writes — so
+    # we deliberately do NOT touch the JSON here (it would clobber the GUI's
+    # other settings like output_dir, skip_ongoing, etc.).
+    (HERE / "canvas_config.py").write_text(
         f"CANVAS_BASE_URL  = {canvas_url!r}\n"
         f"PANOPTO_BASE_URL = {panopto_url!r}\n",
-        encoding="utf-8",
-    )
-    # Write .json for canvas_auth.py which reads it without importing
-    (DATA_DIR / "canvas_config.json").write_text(
-        json.dumps({
-            "canvas_url":  canvas_url,
-            "panopto_url": panopto_url,
-        }, indent=2),
         encoding="utf-8",
     )
 
