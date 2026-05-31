@@ -42,7 +42,7 @@ except ImportError:
 
 try:
     from canvas_config import CANVAS_BASE_URL as _canvas_url, PANOPTO_BASE_URL as _pu
-    CANVAS_BASE_URL = _canvas_url
+    CANVAS_BASE_URL  = _canvas_url
     PANOPTO_BASE_URL = _pu
 except ImportError:
     CANVAS_BASE_URL  = "https://canvas.harvard.edu"
@@ -112,7 +112,9 @@ def _canvas_get(url: str, params: dict | None = None) -> requests.Response:
     headers    = {"Cookie": cookie_str} if cookie_str else {}
     for attempt in range(4):
         try:
-            r = requests.get(url, headers=headers, params=params or {}, timeout=60)
+            r = requests.get(
+                url, headers=headers, params=params or {}, timeout=60
+            )
             if r.status_code == 429:
                 time.sleep(int(r.headers.get("Retry-After", 15)))
                 continue
@@ -463,6 +465,25 @@ class PanoptoBrowser:
             viewport={"width": 1280, "height": 900},
             args=["--disable-blink-features=AutomationControlled"],
         )
+
+        # KEY FIX: explicitly load Canvas session cookies into the browser.
+        # The browser_profile should already have them, but this guarantees
+        # they are present even if the profile was freshly created.
+        canvas_cookie_file = Path("./canvas_cookies.json")
+        if canvas_cookie_file.exists():
+            try:
+                cookies = json.loads(
+                    canvas_cookie_file.read_text(encoding="utf-8")
+                )
+                if cookies:
+                    self._ctx.add_cookies(cookies)
+                    log.info(
+                        f"  Loaded {len(cookies)} Canvas session cookie(s) "
+                        f"into browser."
+                    )
+            except Exception as exc:
+                log.warning(f"  Could not load Canvas cookies: {exc}")
+
         self._page = self._ctx.new_page()
         return self
 
@@ -502,104 +523,220 @@ class PanoptoBrowser:
         Navigate to a Canvas LTI Panopto URL and return
         [(session_id, title), ...] for all recordings.
 
-        KEY FIX: reads from page.frames (the Panopto iframe),
-        NOT from page.url or page.content() which only see the
-        outer Canvas wrapper.
+        KEY FIXES:
+        1. Intercepts Panopto API network responses to capture
+           folder/session IDs directly from network traffic —
+           Harvard's LTI integration never puts the folder ID
+           in the URL so we must capture it from API calls.
+        2. Re-navigates to the LTI URL after authentication,
+           since auth redirects away from the original page.
+        3. Adds diagnostic logging when no frame is found.
         """
         page = self._page
 
-        log.info(f"    Navigating: {canvas_url}")
-        try:
-            page.goto(canvas_url, wait_until="domcontentloaded", timeout=40_000)
-        except PWTimeout:
-            log.warning("    (page load timed out — continuing)")
-        except Exception as exc:
-            log.warning(f"    Navigation error: {exc}")
-            return []
+        # ── Network interception ───────────────────────────────────────────
+        captured_folder_ids: list[str] = []
+        captured_sessions:   list[tuple[str, str]] = []
 
-        time.sleep(4)
-
-        if _is_login(page):
-            self._handle_auth()
-            time.sleep(3)
-
-        # Wait for Panopto iframe to appear in page.frames
-        panopto_frame = None
-        for i in range(20):
-            for frame in page.frames:
+        def _on_response(response):
+            try:
+                url = response.url
+                if "panopto" not in url.lower():
+                    return
+                if response.status != 200:
+                    return
+                if not any(p in url for p in
+                           ["/api/v1/", "/Sessions/", "getFolderInfo",
+                            "getSessionList", "BrowseList"]):
+                    return
                 try:
-                    furl = frame.url or ""
-                    if "panopto" in furl.lower() and furl != canvas_url:
-                        panopto_frame = frame
-                        break
+                    body = response.json()
+                except Exception:
+                    return
+                if not isinstance(body, dict):
+                    return
+
+                # Capture folder IDs
+                for key in ("ID", "Id", "id", "FolderId", "folderId",
+                            "ParentFolder", "ParentId"):
+                    val = body.get(key)
+                    if val and isinstance(val, str) and _GUID_RE.match(val):
+                        if val not in captured_folder_ids:
+                            captured_folder_ids.append(val)
+                            log.info(f"    ✓ Folder ID intercepted: {val}")
+
+                # Capture sessions directly
+                results = body.get("Results") or body.get("results") or []
+                for s in results:
+                    if not isinstance(s, dict):
+                        continue
+                    sid  = s.get("Id")   or s.get("id")   or ""
+                    name = s.get("Name") or s.get("name") or "recording"
+                    if sid and _GUID_RE.match(sid):
+                        if not any(x[0] == sid for x in captured_sessions):
+                            captured_sessions.append((sid, name))
+
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
+
+        def _navigate_and_wait(url: str) -> None:
+            """Navigate and allow time for LTI POST + iframe to begin loading."""
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=40_000)
+            except PWTimeout:
+                log.warning("    (page load timed out — continuing)")
+            except Exception as exc:
+                log.warning(f"    Navigation error: {exc}")
+            # Allow extra time for the LTI form to auto-submit
+            # and for the Panopto iframe to begin loading
+            time.sleep(6)
+
+        try:
+            log.info(f"    Navigating: {canvas_url}")
+            _navigate_and_wait(canvas_url)
+
+            # ── Handle login if Canvas redirected to auth ──────────────────
+            if _is_login(page):
+                self._handle_auth()
+                time.sleep(3)
+                # KEY FIX: re-navigate after auth — we ended up on the
+                # wrong page and need to go back to the LTI URL
+                log.info("    Re-navigating after authentication…")
+                _navigate_and_wait(canvas_url)
+
+            # ── Wait for Panopto iframe to appear ──────────────────────────
+            panopto_frame = None
+            for i in range(25):
+                for frame in page.frames:
+                    try:
+                        furl = frame.url or ""
+                        if "panopto" in furl.lower() and furl != canvas_url:
+                            panopto_frame = frame
+                            break
+                    except Exception:
+                        pass
+                if panopto_frame:
+                    log.info(
+                        f"    ✓ Found Panopto frame: {panopto_frame.url[:80]}"
+                    )
+                    break
+                log.info(f"    [{i+1}/25] Waiting for Panopto frame…")
+                time.sleep(1)
+
+            if not panopto_frame:
+                # Diagnostic logging to understand why the frame didn't load
+                log.warning("    No Panopto frame found after 25s.")
+                log.info(f"    Page URL   : {page.url}")
+                try:
+                    log.info(f"    Page title : {page.title()}")
                 except Exception:
                     pass
-            if panopto_frame:
-                log.info(f"    ✓ Found Panopto frame: {panopto_frame.url[:80]}")
-                break
-            log.info(f"    [{i+1}/20] Waiting for Panopto frame…")
-            time.sleep(1)
+                all_frames = [f.url for f in page.frames if f.url]
+                if all_frames:
+                    log.info(f"    Frames present: {all_frames}")
+                else:
+                    log.info("    No sub-frames present on this page.")
+                return []
 
-        if not panopto_frame:
-            log.warning("    No Panopto frame found after 20s.")
-            return []
+            self._save_cookies()
 
-        self._save_cookies()
+            # ── Strategy 1: sessions captured via network interception ─────
+            log.info("    Waiting for Panopto API calls to complete…")
+            for _ in range(20):
+                if captured_sessions:
+                    log.info(
+                        f"    ✓ {len(captured_sessions)} session(s) captured "
+                        f"via network interception."
+                    )
+                    return captured_sessions
+                if captured_folder_ids:
+                    break
+                time.sleep(1)
 
-        # Get folder ID from the frame's URL or HTML
-        folder_id: str | None = None
-        for i in range(15):
-            try:
+            # ── Strategy 2: use intercepted folder ID with REST API ────────
+            folder_id = captured_folder_ids[0] if captured_folder_ids else None
+
+            # ── Strategy 3: folder ID from frame URL ──────────────────────
+            if not folder_id:
                 folder_id = _extract_folder_id(panopto_frame.url)
                 if folder_id:
                     log.info(f"    ✓ Folder ID from frame URL: {folder_id}")
-                    break
+
+            # ── Strategy 4: folder ID via JavaScript ──────────────────────
+            if not folder_id:
+                try:
+                    result = panopto_frame.evaluate("""
+                        () => {
+                            try {
+                                const p = new URL(window.location.href).searchParams;
+                                return p.get('folderID') || p.get('folderId') ||
+                                       p.get('folder')   ||
+                                       window.folderId   || window.folderID || null;
+                            } catch(e) { return null; }
+                        }
+                    """)
+                    if result and _GUID_RE.match(str(result)):
+                        folder_id = result
+                        log.info(f"    ✓ Folder ID from JS: {folder_id}")
+                except Exception:
+                    pass
+
+            # ── Strategy 5: folder ID from frame HTML ─────────────────────
+            if not folder_id:
+                try:
+                    html = panopto_frame.content()
+                    folder_id = _extract_folder_id(html)
+                    if folder_id:
+                        log.info(
+                            f"    ✓ Folder ID from frame HTML: {folder_id}"
+                        )
+                except Exception:
+                    pass
+
+            # ── Use folder ID with REST API ────────────────────────────────
+            if folder_id:
+                sessions = list_panopto_sessions(folder_id)
+                log.info(f"    API returned {len(sessions)} session(s).")
+                if sessions:
+                    return [
+                        (
+                            s.get("Id") or s.get("id", ""),
+                            s.get("Name") or s.get("name") or "recording",
+                        )
+                        for s in sessions
+                        if s.get("Id") or s.get("id")
+                    ]
+
+            # ── Strategy 6: scrape session IDs from frame HTML ────────────
+            log.info("    Scraping frame HTML for session IDs…")
+            try:
+                for _ in range(5):
+                    try:
+                        panopto_frame.evaluate(
+                            "window.scrollTo(0, document.body.scrollHeight)"
+                        )
+                    except Exception:
+                        break
+                    time.sleep(1.5)
                 html = panopto_frame.content()
-                folder_id = _extract_folder_id(html)
-                if folder_id:
-                    log.info(f"    ✓ Folder ID from frame HTML: {folder_id}")
-                    break
+                ids  = _extract_all_session_ids(html)
+                log.info(f"    Found {len(ids)} session ID(s) in frame HTML.")
+                return [
+                    (sid, get_session_title(sid) or f"recording_{sid[:8]}")
+                    for sid in ids
+                ]
+            except Exception as exc:
+                log.warning(f"    Frame scrape error: {exc}")
+
+            return []
+
+        finally:
+            try:
+                page.remove_listener("response", _on_response)
             except Exception:
                 pass
-            log.info(f"    [{i+1}/15] Waiting for folder ID…")
-            time.sleep(1)
-
-        # Try Panopto REST API with the folder ID
-        if folder_id:
-            sessions = list_panopto_sessions(folder_id)
-            log.info(f"    API returned {len(sessions)} session(s).")
-            if sessions:
-                return [
-                    (
-                        s.get("Id") or s.get("id", ""),
-                        s.get("Name") or s.get("name") or "recording",
-                    )
-                    for s in sessions
-                    if s.get("Id") or s.get("id")
-                ]
-
-        # Fallback: scrape session IDs from the frame's HTML
-        log.info("    Scraping frame HTML for session IDs…")
-        try:
-            for _ in range(5):
-                try:
-                    panopto_frame.evaluate(
-                        "window.scrollTo(0, document.body.scrollHeight)"
-                    )
-                except Exception:
-                    break
-                time.sleep(1.5)
-            html = panopto_frame.content()
-            ids  = _extract_all_session_ids(html)
-            log.info(f"    Found {len(ids)} session ID(s) in frame HTML.")
-            return [
-                (sid, get_session_title(sid) or f"recording_{sid[:8]}")
-                for sid in ids
-            ]
-        except Exception as exc:
-            log.warning(f"    Frame scrape error: {exc}")
-
-        return []
 
     def ensure_panopto_auth(self):
         try:
@@ -716,7 +853,7 @@ def main() -> None:
     dedup = DedupIndex(DEDUP_INDEX_FILE)
 
     log.info("═" * 70)
-    log.info("  📹  Panopto Downloader  (iframe-aware)")
+    log.info("  📹  Panopto Downloader  (network interception + re-nav fix)")
     log.info("═" * 70)
     if args.dry_run:
         log.info("  DRY-RUN — nothing will be written.\n")
