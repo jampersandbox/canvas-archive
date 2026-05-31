@@ -859,6 +859,7 @@ def process_course(
     log.info(f"    Total recordings to process: {len(to_download)}")
 
     for sid, title in to_download:
+        was_already_known = dedup.already_downloaded(sid) is not None
         ok = download_video(
             session_id=sid,
             dest_dir=dest_dir,
@@ -868,7 +869,7 @@ def process_course(
             dry_run=dry_run,
         )
         if ok:
-            if dedup.already_downloaded(sid) and not dry_run:
+            if was_already_known:
                 counts["duplicate"] += 1
             else:
                 counts["downloaded"] += 1
