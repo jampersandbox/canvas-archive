@@ -193,6 +193,60 @@ def _extract_session_id(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _extract_sessions_from_html(html: str) -> list[tuple[str, str]]:
+    """
+    Extract (session_id, title) pairs from Panopto page HTML.
+    Tries multiple patterns to find real titles alongside IDs.
+    Falls back to generic names only if nothing else works.
+    """
+    sessions: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    guid = _GUID_RE.pattern
+
+    # Pattern 1: JSON with Id then Name
+    for m in re.finditer(
+        r'"(?:Id|id)"\s*:\s*"(' + guid + r')".*?"(?:Name|SessionName)"\s*:\s*"([^"]{2,120})"',
+        html, re.I | re.DOTALL,
+    ):
+        sid, name = m.group(1), m.group(2)
+        if sid not in seen:
+            seen.add(sid)
+            sessions.append((sid, name))
+
+    # Pattern 2: JSON with Name then Id
+    for m in re.finditer(
+        r'"(?:Name|SessionName)"\s*:\s*"([^"]{2,120})".*?"(?:Id|id)"\s*:\s*"(' + guid + r')"',
+        html, re.I | re.DOTALL,
+    ):
+        name, sid = m.group(1), m.group(2)
+        if sid not in seen:
+            seen.add(sid)
+            sessions.append((sid, name))
+
+    # Pattern 3: Viewer link with anchor text as title
+    for m in re.finditer(
+        r'Viewer\.aspx\?id=(' + guid + r')[^"]*"[^>]*>([^<]{2,120})</a',
+        html, re.I,
+    ):
+        sid, name = m.group(1), m.group(2).strip()
+        if sid not in seen and name:
+            seen.add(sid)
+            sessions.append((sid, name))
+
+    # Fall back to ID-only patterns
+    for pat in [
+        r'Viewer\.aspx\?id=(' + guid + r')',
+        r'"[Ii]d"\s*:\s*"(' + guid + r')"',
+    ]:
+        for m in re.finditer(pat, html, re.I):
+            sid = m.group(1)
+            if sid not in seen:
+                seen.add(sid)
+                sessions.append((sid, f"recording_{sid[:8]}"))
+
+    return sessions
+  
+
 def _extract_all_session_ids(html: str) -> list[str]:
     ids: list[str] = []
     for m in re.finditer(
@@ -709,7 +763,7 @@ class PanoptoBrowser:
                         if s.get("Id") or s.get("id")
                     ]
 
-            # ── Strategy 6: scrape session IDs from frame HTML ────────────
+            # ── Strategy 6: scrape session IDs and titles from frame HTML ─────
             log.info("    Scraping frame HTML for session IDs…")
             try:
                 for _ in range(5):
@@ -720,13 +774,21 @@ class PanoptoBrowser:
                     except Exception:
                         break
                     time.sleep(1.5)
-                html = panopto_frame.content()
-                ids  = _extract_all_session_ids(html)
-                log.info(f"    Found {len(ids)} session ID(s) in frame HTML.")
-                return [
-                    (sid, get_session_title(sid) or f"recording_{sid[:8]}")
-                    for sid in ids
-                ]
+                html     = panopto_frame.content()
+                sessions = _extract_sessions_from_html(html)
+                log.info(f"    Found {len(sessions)} session(s) in frame HTML.")
+
+                # For any sessions still with generic names, try the API
+                result = []
+                for sid, name in sessions:
+                    if name.startswith("recording_"):
+                        fetched = get_session_title(sid)
+                        if fetched:
+                            log.info(f"    ✓ Title from API: {fetched}")
+                        result.append((sid, fetched if fetched else name))
+                    else:
+                        result.append((sid, name))
+                return result
             except Exception as exc:
                 log.warning(f"    Frame scrape error: {exc}")
 
