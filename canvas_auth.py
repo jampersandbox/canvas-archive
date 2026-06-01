@@ -175,15 +175,33 @@ def get_cookies() -> list[dict]:
             print("═" * 62)
 
             if in_gui:
-                print("  [Waiting for GUI login confirmation...]")
-                # Poll for sentinel file for up to 10 minutes
+                print("  [Watching browser for login automatically...]",
+                      flush=True)
                 for _ in range(1200):
                     if GUI_SENTINEL_FILE.exists():
                         try:
                             GUI_SENTINEL_FILE.unlink()
                         except Exception:
                             pass
+                        print("  ✅  Login confirmed via button.", flush=True)
                         break
+                    try:
+                        current_url = page.url
+                        is_logged_in = (
+                            "login"          not in current_url.lower()
+                            and "saml"       not in current_url.lower()
+                            and "sign_in"    not in current_url.lower()
+                            and "shibboleth" not in current_url.lower()
+                            and canvas_base_url.replace("https://", "")
+                                in current_url
+                            and bool(ctx.cookies())
+                        )
+                        if is_logged_in:
+                            print("  ✅  Login detected automatically.",
+                                  flush=True)
+                            break
+                    except Exception:
+                        pass
                     time.sleep(0.5)
             else:
                 try:
