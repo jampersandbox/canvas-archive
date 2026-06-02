@@ -93,6 +93,7 @@ def get_cookies() -> list[dict]:
     """
     Get Canvas session cookies.
     Uses saved cookies if available — only opens a browser when needed.
+    Validates saved cookies before using them to catch expiry.
     """
     canvas_base_url = _get_canvas_base_url()
 
@@ -101,8 +102,27 @@ def get_cookies() -> list[dict]:
         try:
             cookies = json.loads(COOKIE_FILE.read_text(encoding="utf-8"))
             if cookies:
-                log.info("  ✅  Using saved session cookies.")
-                return cookies
+                try:
+                    import requests as _req
+                    test = _req.get(
+                        f"{canvas_base_url}/api/v1/users/self",
+                        headers={"Cookie": cookies_for_domain(
+                            cookies, canvas_base_url
+                        )},
+                        timeout=10,
+                    )
+                    if test.status_code == 200:
+                        log.info("  ✅  Using saved session cookies.")
+                        return cookies
+                    else:
+                        log.info(
+                            f"  ⚠  Saved cookies expired ({test.status_code})"
+                            f" — logging in again."
+                        )
+                        COOKIE_FILE.unlink()
+                except Exception:
+                    log.info("  ✅  Using saved session cookies (unvalidated).")
+                    return cookies
         except Exception:
             pass
 
@@ -117,7 +137,6 @@ def get_cookies() -> list[dict]:
 
     BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
 
-    # Clean up any leftover sentinel
     if GUI_SENTINEL_FILE.exists():
         try:
             GUI_SENTINEL_FILE.unlink()
@@ -147,19 +166,25 @@ def get_cookies() -> list[dict]:
         except Exception:
             pass
 
-        # Give the page a moment to settle before checking login state
         import time as _time
         _time.sleep(2)
 
-        already_in = (
-            "login"       not in page.url.lower()
-            and "saml"    not in page.url.lower()
-            and "sign_in" not in page.url.lower()
-            and "shibboleth" not in page.url.lower()
-            and canvas_base_url.replace("https://", "") in page.url
-            and bool(ctx.cookies())   # must have cookies to be truly logged in
-        )
-        
+        def _is_logged_in() -> bool:
+            try:
+                current_url = page.url
+                return (
+                    "login"          not in current_url.lower()
+                    and "saml"       not in current_url.lower()
+                    and "sign_in"    not in current_url.lower()
+                    and "shibboleth" not in current_url.lower()
+                    and canvas_base_url.replace("https://", "") in current_url
+                    and bool(ctx.cookies())
+                )
+            except Exception:
+                return False
+
+        already_in = _is_logged_in()
+
         if not already_in:
             print()
             print("═" * 62)
@@ -167,15 +192,11 @@ def get_cookies() -> list[dict]:
             print()
             print("  A browser window has just opened.")
             print("  Log in with your university credentials as normal.")
-            print("  Once you can see the Canvas dashboard,")
-            if in_gui:
-                print("  click the green button in the app to continue.")
-            else:
-                print("  come back here and press ENTER.")
+            print("  The app will continue automatically once you are in.")
             print("═" * 62)
 
             if in_gui:
-                print("  [Watching browser for login automatically...]",
+                print("  [Watching browser for login — no button needed…]",
                       flush=True)
                 for _ in range(1200):
                     if GUI_SENTINEL_FILE.exists():
@@ -185,29 +206,15 @@ def get_cookies() -> list[dict]:
                             pass
                         print("  ✅  Login confirmed via button.", flush=True)
                         break
-                    try:
-                        current_url = page.url
-                        is_logged_in = (
-                            "login"          not in current_url.lower()
-                            and "saml"       not in current_url.lower()
-                            and "sign_in"    not in current_url.lower()
-                            and "shibboleth" not in current_url.lower()
-                            and canvas_base_url.replace("https://", "")
-                                in current_url
-                            and bool(ctx.cookies())
-                        )
-                        if is_logged_in:
-                            print("  ✅  Login detected automatically.",
-                                  flush=True)
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(0.5)
+                    if _is_logged_in():
+                        print("  ✅  Login detected automatically.", flush=True)
+                        break
+                    _time.sleep(0.5)
             else:
                 try:
                     input("\n  [Press ENTER after you are logged in] ")
                 except EOFError:
-                    time.sleep(5)
+                    _time.sleep(5)
 
             try:
                 page.wait_for_load_state("networkidle", timeout=20_000)
@@ -221,7 +228,9 @@ def get_cookies() -> list[dict]:
         cookies = ctx.cookies()
         ctx.close()
 
-    COOKIE_FILE.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+    COOKIE_FILE.write_text(
+        json.dumps(cookies, indent=2), encoding="utf-8"
+    )
     return cookies
 
 

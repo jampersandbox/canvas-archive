@@ -406,6 +406,90 @@ def get_session_title(session_id: str) -> str | None:
     return None
 
 
+def get_session_title_via_browser(session_id: str, page) -> str | None:
+    """Fetch real title by visiting the Panopto viewer page in the browser."""
+    try:
+        url = f"{PANOPTO_BASE_URL}/Panopto/Pages/Viewer.aspx?id={session_id}"
+        page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+        time.sleep(2)
+        title = page.title()
+        if title:
+            title = re.sub(
+                r"\s*[-|]\s*Panopto.*$", "", title, flags=re.I
+            ).strip()
+            if title and len(title) > 2 and not title.lower().startswith("panopto"):
+                return title
+        for sel in ["h1.title", ".title-text", '[class*="title"]', "h1"]:
+            try:
+                el = page.query_selector(sel)
+                if el:
+                    text = (el.inner_text() or "").strip()
+                    if text and len(text) > 2:
+                        return text
+            except Exception:
+                pass
+    except Exception as exc:
+        log.warning(f"    ⚠  Browser title fetch error: {exc}")
+    return None
+
+
+def _rename_panopto_files(
+    dest_dir: Path,
+    dedup: DedupIndex,
+    browser: "PanoptoBrowser",
+) -> None:
+    """
+    Rename any recording_XXXXXXXX.mp4 files to real titles
+    using the already-open authenticated browser session.
+    """
+    mp4_files = list(dest_dir.glob("recording_*.mp4"))
+    if not mp4_files:
+        return
+    log.info(f"    Fetching real titles for {len(mp4_files)} recording(s)…")
+    used_names: set = set()
+
+    for f in mp4_files:
+        partial  = f.stem.replace("recording_", "")
+        full_sid = None
+        for sid in dedup._data:
+            if sid.startswith(partial):
+                full_sid = sid
+                break
+
+        if not full_sid:
+            log.info(f"    ⚠  No session ID for {f.name} — keeping name")
+            continue
+
+        title = get_session_title_via_browser(full_sid, browser._page)
+        if not title:
+            log.info(f"    ⚠  Could not fetch title for {f.name}")
+            continue
+
+        new_name = f"{_sanitize(title)}.mp4"
+        new_path = f.parent / new_name
+
+        if new_path == f:
+            continue
+
+        # Handle collisions
+        if new_path.exists() or new_path in used_names:
+            counter = 2
+            stem    = _sanitize(title)
+            while True:
+                new_path = f.parent / f"{stem} ({counter}).mp4"
+                if not new_path.exists() and new_path not in used_names:
+                    break
+                counter += 1
+
+        try:
+            f.rename(new_path)
+            used_names.add(new_path)
+            dedup.record(full_sid, str(new_path.resolve()))
+            log.info(f"    ✓ {f.name}  →  {new_path.name}")
+        except Exception as exc:
+            log.warning(f"    ✗ Could not rename {f.name}: {exc}")
+
+
 # ───────────────────────────  COOKIE BRIDGE  ──────────────────────────────────
 
 def write_netscape_cookies(cookies: list[dict], filepath: Path) -> None:
@@ -875,6 +959,10 @@ def process_course(
                 counts["downloaded"] += 1
         else:
             counts["failed"] += 1
+
+    # Rename recording_XXXXXXXX files to real titles
+    if not dry_run and to_download:
+        _rename_panopto_files(dest_dir, dedup, browser)
 
     log.info(
         f"  → downloaded: {counts['downloaded']}  "

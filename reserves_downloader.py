@@ -523,12 +523,22 @@ class ReservesBrowser:
         # even when the navigation is via form POST.
         leganto_urls: list[str] = []
 
-        def on_frame_nav(frame):
+    def on_frame_nav(frame):
             try:
                 url = frame.url or ""
                 if url and url not in ("about:blank", "", reserves_url):
                     log.info(f"    Frame nav → {url[:90]}")
                 if _LEGANTO_RE.search(url):
+                    # Skip Canvas/SSO URLs — they match the regex because they
+                    # contain the Leganto domain in query parameters, but
+                    # navigating to them directly causes LTI validation failures.
+                    if any(skip in url for skip in [
+                        "canvas.harvard.edu",
+                        "canvaslms.com",
+                        "sso.canvaslms",
+                        "/leganto/nui/error/",
+                    ]):
+                        return
                     if url not in leganto_urls:
                         leganto_urls.append(url)
                         log.info(f"    ✓ Leganto URL captured: {url[:80]}")
