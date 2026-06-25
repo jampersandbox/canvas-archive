@@ -184,7 +184,7 @@ def _term_label(course: dict) -> str:
 
 
 def _extract_folder_id(text: str) -> str | None:
-    """Extract folder ID handling standard, URL-encoded, and quoted formats."""
+    """Extract folder ID handling standard, URL-encoded and fragment formats."""
     guid = _GUID_RE.pattern
 
     # Standard: folderID=guid
@@ -192,7 +192,8 @@ def _extract_folder_id(text: str) -> str | None:
     if m:
         return m.group(1)
 
-    # URL-encoded quotes: folderID=%22guid%22  ← this is the Harvard LTI pattern
+    # URL fragment with encoding: #folderID=%22guid%22
+    # This is the Harvard LTI pattern seen in frame URLs
     m = re.search(r"folderI[Dd]=%22(" + guid + r")(?:%22|\")", text, re.I)
     if m:
         return m.group(1)
@@ -781,9 +782,25 @@ class PanoptoBrowser:
                 time.sleep(1)
 
             if not panopto_frame:
-                # Diagnostic logging to understand why the frame didn't load
-                log.warning("    No Panopto frame found after 25s.")
-                log.info(f"    Page URL   : {page.url}")
+            # One final check — frame often loads just after the 25s cutoff
+            log.info("    Doing one final frame check after timeout…")
+            time.sleep(5)
+            for frame in page.frames:
+                try:
+                    furl = frame.url or ""
+                    if "panopto" in furl.lower() and furl != canvas_url:
+                        panopto_frame = frame
+                        log.info(
+                            f"    ✓ Found Panopto frame (late): {furl[:80]}"
+                        )
+                        break
+                except Exception:
+                    pass
+
+        if not panopto_frame:
+            # Diagnostic logging to understand why the frame didn't load
+            log.warning("    No Panopto frame found after 30s.")
+            log.info(f"    Page URL   : {page.url}")
                 try:
                     log.info(f"    Page title : {page.title()}")
                 except Exception:
