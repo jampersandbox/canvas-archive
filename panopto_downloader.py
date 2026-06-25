@@ -184,8 +184,25 @@ def _term_label(course: dict) -> str:
 
 
 def _extract_folder_id(text: str) -> str | None:
-    m = re.search(r"folderI[Dd]=(" + _GUID_RE.pattern + r")", text, re.I)
-    return m.group(1) if m else None
+    """Extract folder ID handling standard, URL-encoded, and quoted formats."""
+    guid = _GUID_RE.pattern
+
+    # Standard: folderID=guid
+    m = re.search(r"folderI[Dd]=(" + guid + r")", text, re.I)
+    if m:
+        return m.group(1)
+
+    # URL-encoded quotes: folderID=%22guid%22  ← this is the Harvard LTI pattern
+    m = re.search(r"folderI[Dd]=%22(" + guid + r")(?:%22|\")", text, re.I)
+    if m:
+        return m.group(1)
+
+    # JSON-style quotes: folderID="guid"
+    m = re.search(r'folderI[Dd]="(' + guid + r')"', text, re.I)
+    if m:
+        return m.group(1)
+
+    return None
 
 
 def _extract_session_id(text: str) -> str | None:
