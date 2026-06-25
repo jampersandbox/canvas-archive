@@ -49,7 +49,6 @@ except ImportError:
     PANOPTO_BASE_URL = "https://harvard.hosted.panopto.com"
 PANOPTO_BASE_URL = "https://harvard.hosted.panopto.com"
 
-# Two separate cookie stores — CANVAS_COOKIES is never overwritten by browser
 CANVAS_COOKIES:  list[dict] = []
 BROWSER_COOKIES: list[dict] = []
 
@@ -263,7 +262,7 @@ def _extract_sessions_from_html(html: str) -> list[tuple[str, str]]:
                 sessions.append((sid, f"recording_{sid[:8]}"))
 
     return sessions
-  
+
 
 def _extract_all_session_ids(html: str) -> list[str]:
     ids: list[str] = []
@@ -424,90 +423,6 @@ def get_session_title(session_id: str) -> str | None:
     return None
 
 
-def get_session_title_via_browser(session_id: str, page) -> str | None:
-    """Fetch real title by visiting the Panopto viewer page in the browser."""
-    try:
-        url = f"{PANOPTO_BASE_URL}/Panopto/Pages/Viewer.aspx?id={session_id}"
-        page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-        time.sleep(2)
-        title = page.title()
-        if title:
-            title = re.sub(
-                r"\s*[-|]\s*Panopto.*$", "", title, flags=re.I
-            ).strip()
-            if title and len(title) > 2 and not title.lower().startswith("panopto"):
-                return title
-        for sel in ["h1.title", ".title-text", '[class*="title"]', "h1"]:
-            try:
-                el = page.query_selector(sel)
-                if el:
-                    text = (el.inner_text() or "").strip()
-                    if text and len(text) > 2:
-                        return text
-            except Exception:
-                pass
-    except Exception as exc:
-        log.warning(f"    ⚠  Browser title fetch error: {exc}")
-    return None
-
-
-def _rename_panopto_files(
-    dest_dir: Path,
-    dedup: DedupIndex,
-    browser: "PanoptoBrowser",
-) -> None:
-    """
-    Rename any recording_XXXXXXXX.mp4 files to real titles
-    using the already-open authenticated browser session.
-    """
-    mp4_files = list(dest_dir.glob("recording_*.mp4"))
-    if not mp4_files:
-        return
-    log.info(f"    Fetching real titles for {len(mp4_files)} recording(s)…")
-    used_names: set = set()
-
-    for f in mp4_files:
-        partial  = f.stem.replace("recording_", "")
-        full_sid = None
-        for sid in dedup._data:
-            if sid.startswith(partial):
-                full_sid = sid
-                break
-
-        if not full_sid:
-            log.info(f"    ⚠  No session ID for {f.name} — keeping name")
-            continue
-
-        title = get_session_title_via_browser(full_sid, browser._page)
-        if not title:
-            log.info(f"    ⚠  Could not fetch title for {f.name}")
-            continue
-
-        new_name = f"{_sanitize(title)}.mp4"
-        new_path = f.parent / new_name
-
-        if new_path == f:
-            continue
-
-        # Handle collisions
-        if new_path.exists() or new_path in used_names:
-            counter = 2
-            stem    = _sanitize(title)
-            while True:
-                new_path = f.parent / f"{stem} ({counter}).mp4"
-                if not new_path.exists() and new_path not in used_names:
-                    break
-                counter += 1
-
-        try:
-            f.rename(new_path)
-            used_names.add(new_path)
-            dedup.record(full_sid, str(new_path.resolve()))
-            log.info(f"    ✓ {f.name}  →  {new_path.name}")
-        except Exception as exc:
-            log.warning(f"    ✗ Could not rename {f.name}: {exc}")
-
-
 # ───────────────────────────  COOKIE BRIDGE  ──────────────────────────────────
 
 def write_netscape_cookies(cookies: list[dict], filepath: Path) -> None:
@@ -622,9 +537,7 @@ class PanoptoBrowser:
             args=["--disable-blink-features=AutomationControlled"],
         )
 
-        # KEY FIX: explicitly load Canvas session cookies into the browser.
-        # The browser_profile should already have them, but this guarantees
-        # they are present even if the profile was freshly created.
+        # Load Canvas session cookies into the browser
         canvas_cookie_file = Path("./canvas_cookies.json")
         if canvas_cookie_file.exists():
             try:
@@ -681,12 +594,11 @@ class PanoptoBrowser:
 
         KEY FIXES:
         1. Intercepts Panopto API network responses to capture
-           folder/session IDs directly from network traffic —
-           Harvard's LTI integration never puts the folder ID
-           in the URL so we must capture it from API calls.
-        2. Re-navigates to the LTI URL after authentication,
-           since auth redirects away from the original page.
-        3. Adds diagnostic logging when no frame is found.
+           folder/session IDs directly from network traffic.
+        2. Re-navigates to the LTI URL after authentication.
+        3. Reads folder ID from JS hash (frame.url strips fragments).
+        4. Scrolls inside iframe to trigger lazy loading of all recordings.
+        5. Final late-frame check after timeout.
         """
         page = self._page
 
@@ -738,31 +650,25 @@ class PanoptoBrowser:
         page.on("response", _on_response)
 
         def _navigate_and_wait(url: str) -> None:
-            """Navigate and allow time for LTI POST + iframe to begin loading."""
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=40_000)
             except PWTimeout:
                 log.warning("    (page load timed out — continuing)")
             except Exception as exc:
                 log.warning(f"    Navigation error: {exc}")
-            # Allow extra time for the LTI form to auto-submit
-            # and for the Panopto iframe to begin loading
             time.sleep(6)
 
         try:
             log.info(f"    Navigating: {canvas_url}")
             _navigate_and_wait(canvas_url)
 
-            # ── Handle login if Canvas redirected to auth ──────────────────
             if _is_login(page):
                 self._handle_auth()
                 time.sleep(3)
-                # KEY FIX: re-navigate after auth — we ended up on the
-                # wrong page and need to go back to the LTI URL
                 log.info("    Re-navigating after authentication…")
                 _navigate_and_wait(canvas_url)
 
-            # ── Wait for Panopto iframe to appear ──────────────────────────
+            # ── Wait for Panopto iframe ────────────────────────────────────
             panopto_frame = None
             for i in range(25):
                 for frame in page.frames:
@@ -781,26 +687,26 @@ class PanoptoBrowser:
                 log.info(f"    [{i+1}/25] Waiting for Panopto frame…")
                 time.sleep(1)
 
+            # ── Final late-frame check ─────────────────────────────────────
             if not panopto_frame:
-            # One final check — frame often loads just after the 25s cutoff
-            log.info("    Doing one final frame check after timeout…")
-            time.sleep(5)
-            for frame in page.frames:
-                try:
-                    furl = frame.url or ""
-                    if "panopto" in furl.lower() and furl != canvas_url:
-                        panopto_frame = frame
-                        log.info(
-                            f"    ✓ Found Panopto frame (late): {furl[:80]}"
-                        )
-                        break
-                except Exception:
-                    pass
+                log.info("    Doing one final frame check after timeout…")
+                time.sleep(5)
+                for frame in page.frames:
+                    try:
+                        furl = frame.url or ""
+                        if "panopto" in furl.lower() and furl != canvas_url:
+                            panopto_frame = frame
+                            log.info(
+                                f"    ✓ Found Panopto frame (late): "
+                                f"{furl[:80]}"
+                            )
+                            break
+                    except Exception:
+                        pass
 
-        if not panopto_frame:
-            # Diagnostic logging to understand why the frame didn't load
-            log.warning("    No Panopto frame found after 30s.")
-            log.info(f"    Page URL   : {page.url}")
+            if not panopto_frame:
+                log.warning("    No Panopto frame found after 30s.")
+                log.info(f"    Page URL   : {page.url}")
                 try:
                     log.info(f"    Page title : {page.title()}")
                 except Exception:
@@ -836,16 +742,49 @@ class PanoptoBrowser:
                 if folder_id:
                     log.info(f"    ✓ Folder ID from frame URL: {folder_id}")
 
+            # ── Strategy 3b: folder ID from JS hash ───────────────────────
+            # frame.url strips URL fragments — must use JS to read them
+            if not folder_id:
+                try:
+                    result = panopto_frame.evaluate("""
+                        () => {
+                            try {
+                                const hash = window.location.hash;
+                                const m = hash.match(
+                                    /folderID=%22([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:%22|")/i
+                                );
+                                if (m) return m[1];
+                                const params = new URLSearchParams(
+                                    window.location.search
+                                );
+                                return params.get('folderID')
+                                    || params.get('folderId')
+                                    || null;
+                            } catch(e) { return null; }
+                        }
+                    """)
+                    if result and _GUID_RE.match(str(result)):
+                        folder_id = result
+                        log.info(
+                            f"    ✓ Folder ID from JS hash: {folder_id}"
+                        )
+                except Exception:
+                    pass
+
             # ── Strategy 4: folder ID via JavaScript ──────────────────────
             if not folder_id:
                 try:
                     result = panopto_frame.evaluate("""
                         () => {
                             try {
-                                const p = new URL(window.location.href).searchParams;
-                                return p.get('folderID') || p.get('folderId') ||
+                                const p = new URL(
+                                    window.location.href
+                                ).searchParams;
+                                return p.get('folderID') ||
+                                       p.get('folderId') ||
                                        p.get('folder')   ||
-                                       window.folderId   || window.folderID || null;
+                                       window.folderId   ||
+                                       window.folderID   || null;
                             } catch(e) { return null; }
                         }
                     """)
@@ -881,17 +820,56 @@ class PanoptoBrowser:
                         if s.get("Id") or s.get("id")
                     ]
 
-            # ── Strategy 6: scrape session IDs and titles from frame HTML ─────
+            # ── Strategy 6: scroll inside iframe + scrape ─────────────────
             log.info("    Scraping frame HTML for session IDs…")
             try:
-                for _ in range(5):
+                prev_count = 0
+                for i in range(20):
                     try:
-                        panopto_frame.evaluate(
-                            "window.scrollTo(0, document.body.scrollHeight)"
-                        )
+                        panopto_frame.evaluate("""
+                            () => {
+                                const containers = [
+                                    document.querySelector('#folderList'),
+                                    document.querySelector('.folder-list'),
+                                    document.querySelector('.session-list'),
+                                    document.querySelector(
+                                        '[class*="sessionList"]'
+                                    ),
+                                    document.querySelector(
+                                        '[class*="session-list"]'
+                                    ),
+                                    document.querySelector('[class*="scroll"]'),
+                                    document.documentElement,
+                                    document.body,
+                                ];
+                                for (const el of containers) {
+                                    if (el && el.scrollHeight > el.clientHeight) {
+                                        el.scrollTop = el.scrollHeight;
+                                    }
+                                }
+                                window.scrollTo(
+                                    0, document.body.scrollHeight
+                                );
+                            }
+                        """)
                     except Exception:
                         break
                     time.sleep(1.5)
+
+                    # Stop scrolling once count stabilises
+                    try:
+                        html = panopto_frame.content()
+                        current_ids = _extract_all_session_ids(html)
+                        if i >= 2 and len(current_ids) == prev_count:
+                            log.info(
+                                f"    Scroll stable at {prev_count} "
+                                f"session(s)"
+                            )
+                            break
+                        prev_count = len(current_ids)
+                    except Exception:
+                        break
+
                 html     = panopto_frame.content()
                 sessions = _extract_sessions_from_html(html)
                 log.info(f"    Found {len(sessions)} session(s) in frame HTML.")
@@ -906,7 +884,29 @@ class PanoptoBrowser:
                         result.append((sid, fetched if fetched else name))
                     else:
                         result.append((sid, name))
+
+                if result:
+                    log.info(
+                        f"    Fetching real titles for "
+                        f"{len(result)} recording(s)…"
+                    )
+                    final = []
+                    for sid, name in result:
+                        if name.startswith("recording_"):
+                            fetched = get_session_title(sid)
+                            if fetched:
+                                log.info(
+                                    f"    ✓ {name}  →  {fetched}.mp4"
+                                )
+                                final.append((sid, fetched))
+                            else:
+                                final.append((sid, name))
+                        else:
+                            final.append((sid, name))
+                    return final
+
                 return result
+
             except Exception as exc:
                 log.warning(f"    Frame scrape error: {exc}")
 
@@ -958,7 +958,6 @@ def process_course(
     seen_sids:   set[str] = set()
 
     for url in panopto_urls:
-        # Direct session viewer link
         sid = _extract_session_id(url)
         if sid:
             if sid not in seen_sids:
@@ -967,7 +966,6 @@ def process_course(
                 to_download.append((sid, title))
             continue
 
-        # Canvas LTI link — navigate browser to discover sessions
         sessions = browser.resolve_sessions(url)
         for sid, title in sessions:
             if sid not in seen_sids:
@@ -993,10 +991,6 @@ def process_course(
                 counts["downloaded"] += 1
         else:
             counts["failed"] += 1
-
-    # Rename recording_XXXXXXXX files to real titles
-    if not dry_run and to_download:
-        _rename_panopto_files(dest_dir, dedup, browser)
 
     log.info(
         f"  → downloaded: {counts['downloaded']}  "
