@@ -289,7 +289,7 @@ def fetch_media_objects(course_id: int) -> list[dict]:
 
         best = max(
             sources,
-            key=lambda s: int(s.get("bitrate", 0)),
+            key=lambda s: int(s.get("bitrate") or 0),
             default=sources[0],
         )
         url = best.get("url")

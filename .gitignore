@@ -1,0 +1,21 @@
+# Personal data — never commit (this is what actually holds your Canvas login)
+browser_profile/
+canvas_cookies.json
+panopto_cookies.txt
+canvas_config.json
+canvas_config.py
+gui_login_ready.txt
+
+# Downloaded course material — huge, and personal to whoever ran it
+canvas_downloads/
+*.log
+panopto_dedup_index.json
+reserves_dedup_index.json
+
+# Python environment — machine-specific, huge, and rebuildable via setup_mac.sh / setup_windows.bat
+venv/
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store

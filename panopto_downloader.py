@@ -47,7 +47,6 @@ try:
 except ImportError:
     CANVAS_BASE_URL  = "https://canvas.harvard.edu"
     PANOPTO_BASE_URL = "https://harvard.hosted.panopto.com"
-PANOPTO_BASE_URL = "https://harvard.hosted.panopto.com"
 
 CANVAS_COOKIES:  list[dict] = []
 BROWSER_COOKIES: list[dict] = []
@@ -651,7 +650,7 @@ class PanoptoBrowser:
 
         def _navigate_and_wait(url: str) -> None:
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=40_000)
+                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             except PWTimeout:
                 log.warning("    (page load timed out — continuing)")
             except Exception as exc:
@@ -670,7 +669,7 @@ class PanoptoBrowser:
 
             # ── Wait for Panopto iframe ────────────────────────────────────
             panopto_frame = None
-            for i in range(25):
+            for i in range(40):
                 for frame in page.frames:
                     try:
                         furl = frame.url or ""
@@ -684,7 +683,7 @@ class PanoptoBrowser:
                         f"    ✓ Found Panopto frame: {panopto_frame.url[:80]}"
                     )
                     break
-                log.info(f"    [{i+1}/25] Waiting for Panopto frame…")
+                log.info(f"    [{i+1}/40] Waiting for Panopto frame…")
                 time.sleep(1)
 
             # ── Final late-frame check ─────────────────────────────────────
@@ -923,7 +922,7 @@ class PanoptoBrowser:
             self._page.goto(
                 f"{PANOPTO_BASE_URL}/Panopto/Pages/Home.aspx",
                 wait_until="domcontentloaded",
-                timeout=20_000,
+                timeout=30_000,
             )
             time.sleep(3)
             if _is_login(self._page):

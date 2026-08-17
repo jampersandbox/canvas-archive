@@ -72,15 +72,16 @@ _LOGIN_PHRASES = [
 
 def load_config() -> dict:
     defaults = {
-        "canvas_url":   "https://canvas.harvard.edu",
-        "panopto_url":  "https://harvard.hosted.panopto.com",
-        "output_dir":   str(Path.home() / "Documents" / "canvas_downloads"),
-        "skip_ongoing": True,
-        "skip_videos":  False,
-        "do_canvas":    True,
-        "do_external":  True,
-        "do_panopto":   True,
-        "do_reserves":  True,
+        "canvas_url":      "https://canvas.harvard.edu",
+        "panopto_url":     "https://harvard.hosted.panopto.com",
+        "ezproxy_prefix":  "https://login.ezp-prod1.hul.harvard.edu/login?url=",
+        "output_dir":      str(Path.home() / "Documents" / "canvas_downloads"),
+        "skip_ongoing":    True,
+        "skip_videos":     False,
+        "do_canvas":       True,
+        "do_external":     True,
+        "do_panopto":      True,
+        "do_reserves":     True,
     }
     if CONFIG_FILE.exists():
         try:
@@ -96,14 +97,16 @@ def save_config(cfg: dict) -> None:
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
-def write_canvas_config(canvas_url: str, panopto_url: str) -> None:
+def write_canvas_config(canvas_url: str, panopto_url: str,
+                        ezproxy_prefix: str) -> None:
     # Write .py for scripts that import it. canvas_auth.py reads URLs from
     # canvas_config.json directly, which save_config() already writes — so
     # we deliberately do NOT touch the JSON here (it would clobber the GUI's
     # other settings like output_dir, skip_ongoing, etc.).
     (HERE / "canvas_config.py").write_text(
         f"CANVAS_BASE_URL  = {canvas_url!r}\n"
-        f"PANOPTO_BASE_URL = {panopto_url!r}\n",
+        f"PANOPTO_BASE_URL = {panopto_url!r}\n"
+        f"EZPROXY_PREFIX   = {ezproxy_prefix!r}\n",
         encoding="utf-8",
     )
 
@@ -130,6 +133,12 @@ class CanvasArchiveApp:
         self.panopto_url  = tk.StringVar(
             value=self._cfg.get("panopto_url",
                                 "https://harvard.hosted.panopto.com")
+        )
+        self.ezproxy_prefix = tk.StringVar(
+            value=self._cfg.get(
+                "ezproxy_prefix",
+                "https://login.ezp-prod1.hul.harvard.edu/login?url=",
+            )
         )
         self.output_dir   = tk.StringVar(value=self._cfg["output_dir"])
         self.skip_ongoing = tk.BooleanVar(value=self._cfg["skip_ongoing"])
@@ -280,6 +289,44 @@ class CanvasArchiveApp:
             values=COMMON_CANVAS_URLS,
             width=46, font=("Helvetica", 11),
         ).pack(side="left", padx=4)
+
+        panopto_row = tk.Frame(sf, bg="white")
+        panopto_row.pack(fill="x", pady=4)
+        tk.Label(
+            panopto_row, text="Panopto URL:", width=13,
+            anchor="w", bg="white", font=("Helvetica", 11),
+        ).pack(side="left")
+        ttk.Entry(
+            panopto_row, textvariable=self.panopto_url,
+            width=48, font=("Helvetica", 11),
+        ).pack(side="left", padx=4)
+        tk.Label(
+            sf,
+            text=("  Only needed for lecture recordings — usually "
+                  "https://SCHOOL.hosted.panopto.com. Leave the default "
+                  "only if your school is Harvard."),
+            fg="#666", bg="white", font=("Helvetica", 9), anchor="w",
+            wraplength=560, justify="left",
+        ).pack(fill="x", pady=(0, 4))
+
+        ezproxy_row = tk.Frame(sf, bg="white")
+        ezproxy_row.pack(fill="x", pady=4)
+        tk.Label(
+            ezproxy_row, text="Library proxy:", width=13,
+            anchor="w", bg="white", font=("Helvetica", 11),
+        ).pack(side="left")
+        ttk.Entry(
+            ezproxy_row, textvariable=self.ezproxy_prefix,
+            width=48, font=("Helvetica", 11),
+        ).pack(side="left", padx=4)
+        tk.Label(
+            sf,
+            text=("  Only needed for library reserve readings — your "
+                  "school's EZproxy login prefix. Leave the default "
+                  "only if your school is Harvard."),
+            fg="#666", bg="white", font=("Helvetica", 9), anchor="w",
+            wraplength=560, justify="left",
+        ).pack(fill="x", pady=(0, 4))
 
         dir_row = tk.Frame(sf, bg="white")
         dir_row.pack(fill="x", pady=4)
@@ -519,18 +566,21 @@ class CanvasArchiveApp:
             return
 
         cfg = {
-            "canvas_url":   canvas_url,
-            "panopto_url":  self.panopto_url.get().strip().rstrip("/"),
-            "output_dir":   self.output_dir.get().strip(),
-            "skip_ongoing": self.skip_ongoing.get(),
-            "skip_videos":  self.skip_videos.get(),
-            "do_canvas":    self.do_canvas.get(),
-            "do_external":  self.do_external.get(),
-            "do_panopto":   self.do_panopto.get(),
-            "do_reserves":  self.do_reserves.get(),
+            "canvas_url":     canvas_url,
+            "panopto_url":    self.panopto_url.get().strip().rstrip("/"),
+            "ezproxy_prefix": self.ezproxy_prefix.get().strip(),
+            "output_dir":     self.output_dir.get().strip(),
+            "skip_ongoing":   self.skip_ongoing.get(),
+            "skip_videos":    self.skip_videos.get(),
+            "do_canvas":      self.do_canvas.get(),
+            "do_external":    self.do_external.get(),
+            "do_panopto":     self.do_panopto.get(),
+            "do_reserves":    self.do_reserves.get(),
         }
         save_config(cfg)
-        write_canvas_config(cfg["canvas_url"], cfg["panopto_url"])
+        write_canvas_config(
+            cfg["canvas_url"], cfg["panopto_url"], cfg["ezproxy_prefix"]
+        )
 
         out     = cfg["output_dir"]
         ongoing = ["--skip-ongoing"] if cfg["skip_ongoing"] else []

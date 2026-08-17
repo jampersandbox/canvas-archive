@@ -468,7 +468,7 @@ class BrowserDownloader:
         )
 
         try:
-            page.wait_for_load_state("networkidle", timeout=15_000)
+            page.wait_for_load_state("networkidle", timeout=25_000)
         except PWTimeout:
             pass
 
@@ -535,7 +535,7 @@ class BrowserDownloader:
 
         page.on("download", _on_download)
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
         except PWTimeout:
             log.warning("       (page load timed out — continuing)")
         except Exception as exc:

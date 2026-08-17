@@ -40,11 +40,12 @@ except ImportError:
 # ──────────────────────────────  CONFIGURATION  ───────────────────────────────
 
 try:
-    from canvas_config import CANVAS_BASE_URL as _canvas_url
+    from canvas_config import CANVAS_BASE_URL as _canvas_url, EZPROXY_PREFIX as _ezp
     CANVAS_BASE_URL = _canvas_url
+    EZPROXY_PREFIX  = _ezp
 except ImportError:
     CANVAS_BASE_URL = "https://canvas.harvard.edu"
-EZPROXY_PREFIX   = "https://login.ezp-prod1.hul.harvard.edu/login?url="
+    EZPROXY_PREFIX  = "https://login.ezp-prod1.hul.harvard.edu/login?url="
 CANVAS_COOKIES:  list[dict] = []
 BROWSER_COOKIES: list[dict] = []
 DOWNLOAD_DIR     = Path("./canvas_downloads")
@@ -523,7 +524,7 @@ class ReservesBrowser:
         # even when the navigation is via form POST.
         leganto_urls: list[str] = []
 
-    def on_frame_nav(frame):
+        def on_frame_nav(frame):
             try:
                 url = frame.url or ""
                 if url and url not in ("about:blank", "", reserves_url):

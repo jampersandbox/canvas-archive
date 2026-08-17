@@ -160,9 +160,9 @@ def get_cookies() -> list[dict]:
             page.goto(
                 f"{canvas_base_url}/",
                 wait_until="domcontentloaded",
-                timeout=30_000,
+                timeout=45_000,
             )
-            page.wait_for_load_state("networkidle", timeout=15_000)
+            page.wait_for_load_state("networkidle", timeout=25_000)
         except Exception:
             pass
 
@@ -217,7 +217,7 @@ def get_cookies() -> list[dict]:
                     _time.sleep(5)
 
             try:
-                page.wait_for_load_state("networkidle", timeout=20_000)
+                page.wait_for_load_state("networkidle", timeout=30_000)
             except Exception:
                 pass
 
